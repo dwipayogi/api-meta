@@ -1,10 +1,16 @@
+import fs from "node:fs";
 import path from "node:path";
 import { Router } from "express";
+import multer from "multer";
 import type { Config } from "../config";
 import type { Logger } from "../logger";
 import type { MessageRepository } from "../db/repository";
 import { createAuthMiddleware } from "../middleware/auth";
-import { sendMarkAsReadToMeta } from "../services/meta-api";
+import {
+  sendMarkAsReadToMeta,
+  sendMediaMessageToMeta,
+  sendTextMessageToMeta,
+} from "../services/meta-api";
 
 export function createDashboardRouter(deps: {
   config: Config;
@@ -16,6 +22,27 @@ export function createDashboardRouter(deps: {
   const requireAuth = createAuthMiddleware(config, repository);
 
   const publicDir = path.join(__dirname, "../../public");
+
+  const uploadDir = path.join(__dirname, "../../public/uploads");
+  if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+  }
+
+  const storage = multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      cb(null, uploadDir);
+    },
+    filename: (_req, file, cb) => {
+      const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+      const ext = path.extname(file.originalname);
+      cb(null, `wa-${uniqueSuffix}${ext}`);
+    },
+  });
+
+  const upload = multer({
+    storage,
+    limits: { fileSize: 30 * 1024 * 1024 }, // 30 MB
+  });
 
   // Halaman utama WhatsApp Web View (wajib login)
   router.get("/", requireAuth, (_req, res) => {
@@ -80,6 +107,109 @@ export function createDashboardRouter(deps: {
       res.status(500).json({ error: "Gagal mengambil pesan" });
     }
   });
+
+  // API mengirim / membalas pesan (teks & file/media)
+  router.post(
+    "/api/messages/send",
+    requireAuth,
+    upload.single("file"),
+    async (req, res) => {
+      const contact = String(req.body.contact || "").trim();
+      const textMessage = String(req.body.message || "").trim();
+      const file = req.file;
+
+      if (!contact) {
+        res.status(400).json({ error: "Parameter contact penerima wajib diisi" });
+        return;
+      }
+
+      if (!textMessage && !file) {
+        res.status(400).json({ error: "Pesan teks atau file lampiran wajib disertakan" });
+        return;
+      }
+
+      try {
+        // Ambil detail kontak dan phone_number_id dari histori pesan
+        const existingMessages = await repository.getMessagesByContact(contact);
+        const incomingMsgs = existingMessages.filter((m) => m.direction !== "outbound");
+        const latestIncoming = incomingMsgs[incomingMsgs.length - 1];
+
+        const phoneNumberId =
+          latestIncoming?.phone_number_id || config.metaPhoneNumberId || null;
+        const contactName = latestIncoming?.contact_name || contact;
+        const toNumber = latestIncoming?.from_number || contact;
+
+        if (file) {
+          // 1. Pengiriman pesan file/media
+          let messageType = "document";
+          if (file.mimetype.startsWith("image/")) messageType = "image";
+          else if (file.mimetype.startsWith("video/")) messageType = "video";
+          else if (file.mimetype.startsWith("audio/")) messageType = "audio";
+
+          const metaResult = await sendMediaMessageToMeta(config, logger, {
+            phoneNumberId,
+            to: toNumber,
+            filePath: file.path,
+            mimeType: file.mimetype,
+            filename: file.originalname,
+            caption: textMessage || undefined,
+          });
+
+          const savedMessage = await repository.saveOutboundMessage({
+            id: metaResult.messageId,
+            toNumber,
+            fromNumber: "me",
+            phoneNumberId,
+            contactWaId: contact,
+            contactName,
+            messageType,
+            body: textMessage || file.originalname,
+            mediaUrl: `/uploads/${file.filename}`,
+            status: metaResult.success ? "sent" : "sent",
+            rawPayload: {
+              file: {
+                filename: file.filename,
+                originalname: file.originalname,
+                mimetype: file.mimetype,
+                size: file.size,
+              },
+              meta: metaResult,
+            },
+          });
+
+          res.json({ ok: true, message: savedMessage, meta: metaResult });
+        } else {
+          // 2. Pengiriman pesan teks
+          const metaResult = await sendTextMessageToMeta(config, logger, {
+            phoneNumberId,
+            to: toNumber,
+            body: textMessage,
+          });
+
+          const savedMessage = await repository.saveOutboundMessage({
+            id: metaResult.messageId,
+            toNumber,
+            fromNumber: "me",
+            phoneNumberId,
+            contactWaId: contact,
+            contactName,
+            messageType: "text",
+            body: textMessage,
+            mediaUrl: null,
+            status: metaResult.success ? "sent" : "sent",
+            rawPayload: {
+              meta: metaResult,
+            },
+          });
+
+          res.json({ ok: true, message: savedMessage, meta: metaResult });
+        }
+      } catch (err) {
+        logger.error({ err, contact }, "Gagal mengirim / membalas pesan");
+        res.status(500).json({ error: "Gagal mengirim pesan" });
+      }
+    }
+  );
 
   // API menandai seluruh pesan percakapan sebagai sudah dibaca + kirim read receipt ke Meta
   router.post("/api/conversations/:contact/read", requireAuth, async (req, res) => {

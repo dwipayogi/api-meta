@@ -20,6 +20,12 @@ Stack: Node.js 22+, Express 5, TypeScript, PostgreSQL (`pg`), Pino.
    - *Fallback* otomatis ke `MemoryMessageRepository` jika `DATABASE_URL` belum diset (sangat membantu saat dev lokal / testing).
 3. **WhatsApp Web UI & Payload Viewer**:
    - Tampilan chat modern persis WhatsApp Web (daftar kontak di kiri, balon pesan di kanan).
+   - **Kirim & Balas Pesan (Teks & File/Media)**:
+     - Input bar bergaya WhatsApp Web di bagian bawah chat lengkap dengan tombol lampirkan file (📎) dan tombol kirim (➤).
+     - Pratinjau file sebelum dikirim (nama file, ukuran, dan tombol batal).
+     - Balon pesan keluar (*outbound*) bergaya WhatsApp Web: background hijau muda (`#d9fdd3`), rata kanan, lengkap dengan status centang.
+     - Pratinjau langsung untuk gambar/foto dan kartu dokumen dengan tombol unduh file.
+     - Terintegrasi dengan Meta Cloud API (`/media` untuk upload file dan `/messages` untuk pengiriman).
    - **Indikator Unread & Status Baca (WhatsApp Style)**:
      - Badge bulat hijau unread count pada percakapan dengan pesan baru yang belum dibaca.
      - Teks nama kontak, cuplikan pesan, dan timestamp dibuat tebal (*bold*) berwarna hijau untuk pesan belum dibaca.

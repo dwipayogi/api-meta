@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS messages (
   status VARCHAR(64) NOT NULL DEFAULT 'received',
   is_read BOOLEAN NOT NULL DEFAULT FALSE,
   read_at TIMESTAMPTZ,
+  direction VARCHAR(16) NOT NULL DEFAULT 'inbound',
+  media_url TEXT,
   raw_payload JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

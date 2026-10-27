@@ -10,7 +10,11 @@ import { MemoryMessageRepository } from "../src/db/repository";
 import { createMemoryDedup } from "../src/services/dedup";
 import { createHandlers } from "../src/services/handlers";
 import { createPayloadProcessor } from "../src/services/process-payload";
-import { sendMarkAsReadToMeta } from "../src/services/meta-api";
+import {
+  sendMarkAsReadToMeta,
+  sendMediaMessageToMeta,
+  sendTextMessageToMeta,
+} from "../src/services/meta-api";
 
 const config: Config = {
   nodeEnv: "test",
@@ -317,4 +321,83 @@ test("sendMarkAsReadToMeta: fungsi helper Meta Graph API menangani pengiriman da
   assert.equal(resultWithoutPhone.success, false);
   assert.equal(resultWithoutPhone.skipped, true);
   assert.equal(resultWithoutPhone.reason, "PHONE_NUMBER_ID_MISSING");
+});
+
+test("sendTextMessageToMeta & sendMediaMessageToMeta: graceful fallback saat token/phone id tidak diset", async () => {
+  const textRes = await sendTextMessageToMeta(
+    { metaAccessToken: undefined, metaPhoneNumberId: "123" },
+    logger,
+    { to: "123456", body: "Halo" }
+  );
+  assert.equal(textRes.success, false);
+  assert.equal(textRes.skipped, true);
+
+  const mediaRes = await sendMediaMessageToMeta(
+    { metaAccessToken: undefined, metaPhoneNumberId: "123" },
+    logger,
+    { to: "123456", filePath: "dummy", mimeType: "image/png", filename: "test.png" }
+  );
+  assert.equal(mediaRes.success, false);
+  assert.equal(mediaRes.skipped, true);
+});
+
+test("API /api/messages/send: Mengirim pesan balasan teks dan pesan file berhasil disimpan dan tampil di histori", async () => {
+  // Login dengan admin
+  const loginRes = await fetch(`${baseUrl}/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: "admin", password: "newAdminPassword456" }),
+  });
+  const sessionCookie = loginRes.headers.get("set-cookie")!.split(";")[0];
+
+  // 1. Kirim pesan teks balasan
+  const sendForm = new FormData();
+  sendForm.append("contact", "13557825698");
+  sendForm.append("message", "Halo ini balasan dari admin!");
+
+  const sendTextRes = await fetch(`${baseUrl}/api/messages/send`, {
+    method: "POST",
+    headers: { cookie: sessionCookie },
+    body: sendForm,
+  });
+  assert.equal(sendTextRes.status, 200);
+  const textData = await sendTextRes.json();
+  assert.equal(textData.ok, true);
+  assert.equal(textData.message.body, "Halo ini balasan dari admin!");
+  assert.equal(textData.message.direction, "outbound");
+
+  // 2. Kirim pesan dengan lampiran file
+  const fileContent = "Isi file dokumen penawaran harga...";
+  const blob = new Blob([fileContent], { type: "text/plain" });
+
+  const sendFileForm = new FormData();
+  sendFileForm.append("contact", "13557825698");
+  sendFileForm.append("message", "Silakan cek penawaran kami:");
+  sendFileForm.append("file", blob, "penawaran.txt");
+
+  const sendFileRes = await fetch(`${baseUrl}/api/messages/send`, {
+    method: "POST",
+    headers: { cookie: sessionCookie },
+    body: sendFileForm,
+  });
+  assert.equal(sendFileRes.status, 200);
+  const fileData = await sendFileRes.json();
+  assert.equal(fileData.ok, true);
+  assert.equal(fileData.message.direction, "outbound");
+  assert.ok(fileData.message.media_url);
+  assert.equal(fileData.message.message_type, "document");
+
+  // 3. Verifikasi histori percakapan kontak
+  const msgsRes = await fetch(`${baseUrl}/api/messages?contact=13557825698`, {
+    headers: { cookie: sessionCookie },
+  });
+  assert.equal(msgsRes.status, 200);
+  const messages = await msgsRes.json();
+  assert.ok(messages.length >= 3); // 1 pesan masuk + 2 pesan keluar
+
+  const outboundMsgs = messages.filter((m: any) => m.direction === "outbound");
+  assert.equal(outboundMsgs.length, 2);
+  assert.equal(outboundMsgs[0].body, "Halo ini balasan dari admin!");
+  assert.equal(outboundMsgs[1].body, "Silakan cek penawaran kami:");
+  assert.ok(outboundMsgs[1].media_url);
 });

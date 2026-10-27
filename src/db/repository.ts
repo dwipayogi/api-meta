@@ -23,8 +23,24 @@ export interface StoredMessage {
   status: string;
   is_read: boolean;
   read_at?: string | null;
+  direction?: "inbound" | "outbound";
+  media_url?: string | null;
   raw_payload: unknown;
   created_at: string;
+}
+
+export interface SaveOutboundMessageInput {
+  id?: string;
+  toNumber: string;
+  fromNumber?: string;
+  phoneNumberId?: string | null;
+  contactWaId: string;
+  contactName?: string | null;
+  messageType: string;
+  body: string;
+  mediaUrl?: string | null;
+  status?: string;
+  rawPayload?: unknown;
 }
 
 export interface ConversationSummary {
@@ -70,6 +86,7 @@ export interface MessageRepository {
   markConversationAsRead(identifier: string): Promise<StoredMessage[]>;
   markConversationAsUnread(identifier: string): Promise<boolean>;
   markMessageAsRead(messageId: string): Promise<StoredMessage | null>;
+  saveOutboundMessage(input: SaveOutboundMessageInput): Promise<StoredMessage>;
   
   // Log Webhook
   saveWebhookLog(input: SaveWebhookLogInput): Promise<void>;
@@ -167,6 +184,8 @@ export class PgMessageRepository implements MessageRepository {
         status VARCHAR(64) NOT NULL DEFAULT 'received',
         is_read BOOLEAN NOT NULL DEFAULT FALSE,
         read_at TIMESTAMPTZ,
+        direction VARCHAR(16) NOT NULL DEFAULT 'inbound',
+        media_url TEXT,
         raw_payload JSONB,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
@@ -175,9 +194,11 @@ export class PgMessageRepository implements MessageRepository {
       CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_messages_contact_wa_id ON messages(contact_wa_id);
 
-      -- Auto-migrasi kolom is_read & read_at jika tabel sudah ada sebelumnya
+      -- Auto-migrasi kolom is_read, read_at, direction, media_url jika tabel sudah ada sebelumnya
       ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_read BOOLEAN NOT NULL DEFAULT FALSE;
       ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ;
+      ALTER TABLE messages ADD COLUMN IF NOT EXISTS direction VARCHAR(16) NOT NULL DEFAULT 'inbound';
+      ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_url TEXT;
       CREATE INDEX IF NOT EXISTS idx_messages_contact_is_read ON messages(contact_wa_id, is_read);
 
       CREATE TABLE IF NOT EXISTS message_statuses (
@@ -353,14 +374,14 @@ export class PgMessageRepository implements MessageRepository {
       agg AS (
         SELECT
           b.contact_identifier,
-          COALESCE(MAX(c.name), MAX(b.contact_name), b.from_number) AS contact_name,
-          b.from_number,
+          COALESCE(MAX(c.name), MAX(b.contact_name), b.contact_identifier) AS contact_name,
+          COALESCE(MAX(c.phone_number), MAX(CASE WHEN b.direction != 'outbound' THEN b.from_number END), MAX(b.to_number), b.contact_identifier) AS from_number,
           MAX(b.timestamp) AS last_timestamp,
           COUNT(b.id)::int AS message_count,
           COUNT(CASE WHEN b.is_read = FALSE THEN 1 END)::int AS unread_count
         FROM base b
         LEFT JOIN contacts c ON c.wa_id = b.contact_wa_id
-        GROUP BY b.contact_identifier, b.from_number
+        GROUP BY b.contact_identifier
       ),
       latest AS (
         SELECT DISTINCT ON (contact_identifier) contact_identifier, body
@@ -406,16 +427,20 @@ export class PgMessageRepository implements MessageRepository {
          status,
          is_read,
          read_at,
+         direction,
+         media_url,
          raw_payload,
          created_at
        FROM messages
-       WHERE contact_wa_id = $1 OR from_number = $1
+       WHERE contact_wa_id = $1 OR from_number = $1 OR to_number = $1
        ORDER BY timestamp ASC, created_at ASC`,
       [identifier]
     );
 
     return result.rows.map((row) => ({
       ...row,
+      direction: row.direction || (row.from_number === "me" ? "outbound" : "inbound"),
+      media_url: row.media_url || null,
       is_read: Boolean(row.is_read),
       read_at: row.read_at ? new Date(row.read_at).toISOString() : null,
       timestamp: new Date(row.timestamp).toISOString(),
@@ -472,6 +497,70 @@ export class PgMessageRepository implements MessageRepository {
     const row = result.rows[0];
     return {
       ...row,
+      is_read: Boolean(row.is_read),
+      read_at: row.read_at ? new Date(row.read_at).toISOString() : null,
+      timestamp: new Date(row.timestamp).toISOString(),
+      created_at: new Date(row.created_at).toISOString(),
+    };
+  }
+
+  async saveOutboundMessage(input: SaveOutboundMessageInput): Promise<StoredMessage> {
+    const id = input.id || `out_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const fromNumber = input.fromNumber || "me";
+    const toNumber = input.toNumber;
+    const contactWaId = input.contactWaId;
+    const contactName = input.contactName || input.toNumber;
+    const messageType = input.messageType || "text";
+    const body = input.body;
+    const mediaUrl = input.mediaUrl || null;
+    const status = input.status || "sent";
+    const timestamp = new Date();
+    const rawPayload = input.rawPayload || { outbound: true };
+
+    // Pastikan kontak ada di tabel contacts
+    await this.pool.query(
+      `INSERT INTO contacts (wa_id, name, phone_number, updated_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (wa_id) DO UPDATE SET
+         name = COALESCE(contacts.name, EXCLUDED.name),
+         phone_number = COALESCE(contacts.phone_number, EXCLUDED.phone_number),
+         updated_at = NOW()`,
+      [contactWaId, contactName, toNumber]
+    );
+
+    const result = await this.pool.query<any>(
+      `INSERT INTO messages (
+         id, from_number, to_number, phone_number_id,
+         contact_wa_id, contact_name, message_type,
+         body, timestamp, status, is_read, read_at,
+         direction, media_url, raw_payload
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, NOW(),
+         'outbound', $11, $12
+       ) RETURNING id, from_number, to_number, phone_number_id, contact_wa_id,
+                 contact_name, message_type, body, timestamp, status,
+                 is_read, read_at, direction, media_url, raw_payload, created_at`,
+      [
+        id,
+        fromNumber,
+        toNumber,
+        input.phoneNumberId || null,
+        contactWaId,
+        contactName,
+        messageType,
+        body,
+        timestamp,
+        status,
+        mediaUrl,
+        JSON.stringify(rawPayload),
+      ]
+    );
+
+    const row = result.rows[0];
+    return {
+      ...row,
+      direction: row.direction || "outbound",
+      media_url: row.media_url || null,
       is_read: Boolean(row.is_read),
       read_at: row.read_at ? new Date(row.read_at).toISOString() : null,
       timestamp: new Date(row.timestamp).toISOString(),
@@ -615,6 +704,8 @@ export class MemoryMessageRepository implements MessageRepository {
       status: "received",
       is_read: false,
       read_at: null,
+      direction: "inbound",
+      media_url: null,
       raw_payload: { msg, value },
       created_at: now,
     });
@@ -652,9 +743,10 @@ export class MemoryMessageRepository implements MessageRepository {
     >();
 
     for (const msg of this.messages.values()) {
-      const identifier = msg.contact_wa_id || msg.from_number;
+      const identifier = msg.contact_wa_id || (msg.direction === "outbound" ? msg.to_number : msg.from_number) || msg.from_number;
       const contact = this.contacts.get(identifier);
-      const contactName = contact?.name || msg.contact_name || msg.from_number;
+      const contactName = contact?.name || msg.contact_name || identifier;
+      const phoneNumber = contact?.phone_number || (msg.direction === "outbound" ? msg.to_number : msg.from_number) || identifier;
       const isUnread = !msg.is_read;
 
       const existing = grouped.get(identifier);
@@ -662,7 +754,7 @@ export class MemoryMessageRepository implements MessageRepository {
         grouped.set(identifier, {
           contact_identifier: identifier,
           contact_name: contactName,
-          from_number: msg.from_number,
+          from_number: phoneNumber,
           last_message: msg.body,
           last_timestamp: msg.timestamp,
           message_count: 1,
@@ -688,7 +780,11 @@ export class MemoryMessageRepository implements MessageRepository {
   async getMessagesByContact(identifier: string): Promise<StoredMessage[]> {
     const list: StoredMessage[] = [];
     for (const msg of this.messages.values()) {
-      if (msg.contact_wa_id === identifier || msg.from_number === identifier) {
+      if (
+        msg.contact_wa_id === identifier ||
+        msg.from_number === identifier ||
+        msg.to_number === identifier
+      ) {
         list.push({ ...msg });
       }
     }
@@ -701,7 +797,12 @@ export class MemoryMessageRepository implements MessageRepository {
     const marked: StoredMessage[] = [];
     const now = new Date().toISOString();
     for (const msg of this.messages.values()) {
-      if ((msg.contact_wa_id === identifier || msg.from_number === identifier) && !msg.is_read) {
+      if (
+        (msg.contact_wa_id === identifier ||
+          msg.from_number === identifier ||
+          msg.to_number === identifier) &&
+        !msg.is_read
+      ) {
         msg.is_read = true;
         msg.read_at = now;
         marked.push({ ...msg });
@@ -712,7 +813,10 @@ export class MemoryMessageRepository implements MessageRepository {
 
   async markConversationAsUnread(identifier: string): Promise<boolean> {
     const matching = Array.from(this.messages.values()).filter(
-      (m) => m.contact_wa_id === identifier || m.from_number === identifier
+      (m) =>
+        m.contact_wa_id === identifier ||
+        m.from_number === identifier ||
+        m.to_number === identifier
     );
     if (matching.length === 0) return false;
     matching.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
@@ -728,6 +832,44 @@ export class MemoryMessageRepository implements MessageRepository {
     if (!msg) return null;
     msg.is_read = true;
     msg.read_at = new Date().toISOString();
+    return { ...msg };
+  }
+
+  async saveOutboundMessage(input: SaveOutboundMessageInput): Promise<StoredMessage> {
+    const id = input.id || `out_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const now = new Date().toISOString();
+    const contactWaId = input.contactWaId;
+    const toNumber = input.toNumber;
+    const contactName = input.contactName || toNumber;
+
+    if (!this.contacts.has(contactWaId)) {
+      this.contacts.set(contactWaId, {
+        wa_id: contactWaId,
+        name: contactName,
+        phone_number: toNumber,
+        updated_at: new Date(),
+      });
+    }
+
+    const msg: StoredMessage = {
+      id,
+      from_number: input.fromNumber || "me",
+      to_number: toNumber,
+      phone_number_id: input.phoneNumberId || null,
+      contact_wa_id: contactWaId,
+      contact_name: contactName,
+      message_type: input.messageType || "text",
+      body: input.body,
+      timestamp: now,
+      status: input.status || "sent",
+      is_read: true,
+      read_at: now,
+      direction: "outbound",
+      media_url: input.mediaUrl || null,
+      raw_payload: input.rawPayload || { outbound: true },
+      created_at: now,
+    };
+    this.messages.set(id, msg);
     return { ...msg };
   }
 

@@ -111,6 +111,38 @@
         <div class="messages-container" id="messages-container">
           <!-- Pesan chat akan di-render di sini -->
         </div>
+
+        <!-- Chat Input Footer -->
+        <footer class="chat-footer">
+          <form class="chat-input-form" id="chat-input-form">
+            <!-- File preview bar (saat ada file dipilih) -->
+            <div class="file-preview-bar" id="file-preview-bar" style="display: none;">
+              <div class="file-preview-info">
+                <span class="file-preview-icon" id="file-preview-icon">📎</span>
+                <span class="file-preview-name" id="file-preview-name">nama-file.png</span>
+                <span class="file-preview-size" id="file-preview-size">1.2 MB</span>
+              </div>
+              <button type="button" class="btn-remove-file" id="btn-remove-file" title="Hapus file">✕</button>
+            </div>
+
+            <div class="chat-input-row">
+              <label class="btn-attach" title="Kirim File atau Gambar">
+                <input type="file" id="chat-file-input" style="display: none;">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+                </svg>
+              </label>
+
+              <textarea id="chat-message-input" rows="1" placeholder="Ketik pesan..." autocomplete="off"></textarea>
+
+              <button type="submit" class="btn-send-message" id="btn-send-message" title="Kirim pesan">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                </svg>
+              </button>
+            </div>
+          </form>
+        </footer>
       </div>
     </main>
   </div>

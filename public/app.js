@@ -21,6 +21,19 @@
   const currentUserAvatarEl = document.getElementById("current-user-avatar");
   const currentUsernameEl = document.getElementById("current-username");
 
+  // Input Chat & File Elemen
+  const chatInputFormEl = document.getElementById("chat-input-form");
+  const chatMessageInputEl = document.getElementById("chat-message-input");
+  const chatFileInputEl = document.getElementById("chat-file-input");
+  const btnSendMessageEl = document.getElementById("btn-send-message");
+  const filePreviewBarEl = document.getElementById("file-preview-bar");
+  const filePreviewNameEl = document.getElementById("file-preview-name");
+  const filePreviewIconEl = document.getElementById("file-preview-icon");
+  const filePreviewSizeEl = document.getElementById("file-preview-size");
+  const btnRemoveFileEl = document.getElementById("btn-remove-file");
+
+  let selectedFile = null;
+
   // Modal Elemen
   const payloadModalEl = document.getElementById("payload-modal");
   const btnModalCloseX = document.getElementById("btn-modal-close-x");
@@ -312,7 +325,8 @@
       }
 
       const timeStr = msgDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      const senderName = msg.contact_name || msg.from_number;
+      const isOutbound = msg.direction === "outbound" || msg.from_number === "me";
+      const senderName = isOutbound ? "Anda" : (msg.contact_name || msg.from_number);
 
       // Status centang pesan WhatsApp (✓, ✓✓ abu, ✓✓ biru)
       let tickHtml = "";
@@ -326,11 +340,35 @@
         tickHtml = `<span class="msg-status-tick" style="color: #ea0038;" title="Gagal Terkirim">!</span>`;
       }
 
+      // Render media (gambar atau dokumen/file lain)
+      let mediaHtml = "";
+      if (msg.media_url) {
+        const isImage = msg.message_type === "image" || /\.(png|jpe?g|gif|webp)$/i.test(msg.media_url);
+        if (isImage) {
+          mediaHtml = `
+            <a href="${escapeHtml(msg.media_url)}" target="_blank" rel="noopener noreferrer">
+              <img src="${escapeHtml(msg.media_url)}" class="message-media-img" alt="Foto">
+            </a>
+          `;
+        } else {
+          mediaHtml = `
+            <a href="${escapeHtml(msg.media_url)}" target="_blank" download class="message-media-doc" rel="noopener noreferrer">
+              <span class="doc-icon">📄</span>
+              <div class="doc-info">
+                <div class="doc-name">${escapeHtml(msg.body || "Lampiran")}</div>
+                <div class="doc-action">Unduh File ⭳</div>
+              </div>
+            </a>
+          `;
+        }
+      }
+
       htmlParts.push(`
-        <div class="message-row">
+        <div class="message-row ${isOutbound ? "outbound" : ""}">
           <div class="message-bubble">
             <div class="message-sender">${escapeHtml(senderName)}</div>
-            <div class="message-text">${escapeHtml(msg.body)}</div>
+            ${mediaHtml}
+            ${msg.body && (!msg.media_url || msg.message_type === "image") ? `<div class="message-text">${escapeHtml(msg.body)}</div>` : ""}
             <div class="message-meta">
               <span class="message-time">
                 ${escapeHtml(timeStr)}
@@ -413,6 +451,98 @@
       manualUnreadContactId = activeContactId;
       await markAsUnread(activeContactId);
       await loadConversations();
+    });
+  }
+
+  // Format Ukuran File
+  function formatFileSize(bytes) {
+    if (!bytes) return "0 B";
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  // Event Listener Pemilihan File
+  if (chatFileInputEl && filePreviewBarEl) {
+    chatFileInputEl.addEventListener("change", () => {
+      if (chatFileInputEl.files && chatFileInputEl.files[0]) {
+        selectedFile = chatFileInputEl.files[0];
+        filePreviewNameEl.textContent = selectedFile.name;
+        filePreviewSizeEl.textContent = formatFileSize(selectedFile.size);
+        filePreviewIconEl.textContent = selectedFile.type.startsWith("image/") ? "📷" : "📄";
+        filePreviewBarEl.style.display = "flex";
+        if (chatMessageInputEl) chatMessageInputEl.focus();
+      }
+    });
+
+    if (btnRemoveFileEl) {
+      btnRemoveFileEl.addEventListener("click", () => {
+        selectedFile = null;
+        chatFileInputEl.value = "";
+        filePreviewBarEl.style.display = "none";
+      });
+    }
+  }
+
+  // Submit Kirim Pesan & File
+  if (chatInputFormEl && chatMessageInputEl) {
+    chatMessageInputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        chatInputFormEl.requestSubmit
+          ? chatInputFormEl.requestSubmit()
+          : chatInputFormEl.dispatchEvent(new Event("submit", { cancelable: true }));
+      }
+    });
+
+    chatInputFormEl.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (!activeContactId) {
+        alert("Pilih percakapan terlebih dahulu");
+        return;
+      }
+
+      const text = chatMessageInputEl.value.trim();
+      if (!text && !selectedFile) {
+        return;
+      }
+
+      if (btnSendMessageEl) btnSendMessageEl.disabled = true;
+
+      try {
+        const formData = new FormData();
+        formData.append("contact", activeContactId);
+        if (text) formData.append("message", text);
+        if (selectedFile) formData.append("file", selectedFile);
+
+        const res = await fetch("/api/messages/send", {
+          method: "POST",
+          body: formData,
+        });
+
+        const data = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+          alert("Gagal mengirim pesan: " + (data.error || res.statusText));
+          return;
+        }
+
+        // Reset input form
+        chatMessageInputEl.value = "";
+        selectedFile = null;
+        if (chatFileInputEl) chatFileInputEl.value = "";
+        if (filePreviewBarEl) filePreviewBarEl.style.display = "none";
+
+        // Refresh pesan dan daftar kontak
+        await loadMessages(true);
+        await loadConversations();
+      } catch (err) {
+        console.error("Gagal mengirim pesan:", err);
+        alert("Terjadi kesalahan saat mengirim pesan.");
+      } finally {
+        if (btnSendMessageEl) btnSendMessageEl.disabled = false;
+        chatMessageInputEl.focus();
+      }
     });
   }
 
