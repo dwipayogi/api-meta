@@ -10,6 +10,11 @@ import { MemoryMessageRepository } from "../src/db/repository";
 import { createMemoryDedup } from "../src/services/dedup";
 import { createHandlers } from "../src/services/handlers";
 import { createPayloadProcessor } from "../src/services/process-payload";
+import {
+  sendMarkAsReadToMeta,
+  sendMediaMessageToMeta,
+  sendTextMessageToMeta,
+} from "../src/services/meta-api";
 
 const config: Config = {
   nodeEnv: "test",
@@ -38,7 +43,7 @@ before(async () => {
     repository,
   });
   await new Promise<void>((resolve) => {
-    server = app.listen(0, resolve);
+    server = app.listen(0, () => resolve());
   });
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -47,6 +52,14 @@ after(() => {
   dedup.stop();
   server.close();
 });
+
+function getSessionCookie(res: Response): string {
+  const header = res.headers.get("set-cookie");
+  assert.ok(header);
+  const cookie = header.split(";")[0];
+  assert.ok(cookie);
+  return cookie;
+}
 
 const sign = (raw: string, secret = config.appSecret) =>
   "sha256=" + crypto.createHmac("sha256", secret).update(raw).digest("hex");
@@ -108,23 +121,23 @@ test("Webhook memproses dan menyimpan pesan dari payload contoh pengguna ke repo
   // Verifikasi data di repository
   const conversations = await repository.getConversations();
   assert.equal(conversations.length, 1);
-  assert.equal(conversations[0].contact_name, "Jessica Laverdetman");
-  assert.equal(conversations[0].last_message, "Hi!");
-  assert.equal(conversations[0].from_number, "17863559966");
+  assert.equal(conversations[0]!.contact_name, "Jessica Laverdetman");
+  assert.equal(conversations[0]!.last_message, "Hi!");
+  assert.equal(conversations[0]!.from_number, "17863559966");
 
   const messages = await repository.getMessagesByContact("13557825698");
   assert.equal(messages.length, 1);
-  assert.equal(messages[0].body, "Hi!");
-  assert.equal(messages[0].id, "wamid.HBgLMTc4NjM1NTk5NjYVAGHAYWYET688aASGNTI1QzZFQjhEMDk2QQA=");
-  assert.equal(messages[0].phone_number_id, "7794189252778687");
-  assert.ok(messages[0].raw_payload);
+  assert.equal(messages[0]!.body, "Hi!");
+  assert.equal(messages[0]!.id, "wamid.HBgLMTc4NjM1NTk5NjYVAGHAYWYET688aASGNTI1QzZFQjhEMDk2QQA=");
+  assert.equal(messages[0]!.phone_number_id, "7794189252778687");
+  assert.ok(messages[0]!.raw_payload);
 
   // Verifikasi log webhook otomatis tersimpan
   const webhookLogs = await repository.getWebhookLogs();
   assert.ok(webhookLogs.length >= 1);
-  assert.equal(webhookLogs[0].status_code, 200);
-  assert.equal(webhookLogs[0].object_type, "whatsapp_business_account");
-  assert.deepEqual(webhookLogs[0].payload, userExamplePayload);
+  assert.equal(webhookLogs[0]!.status_code, 200);
+  assert.equal(webhookLogs[0]!.object_type, "whatsapp_business_account");
+  assert.deepEqual(webhookLogs[0]!.payload, userExamplePayload);
 });
 
 test("Proteksi Auth: Akses /api/conversations tanpa login menghasilkan 401", async () => {
@@ -161,9 +174,7 @@ test("Login menggunakan akun dari DB (default admin / admin123)", async () => {
   });
   assert.equal(loginRes.status, 200);
 
-  const cookieHeader = loginRes.headers.get("set-cookie");
-  assert.ok(cookieHeader);
-  const sessionCookie = cookieHeader.split(";")[0];
+  const sessionCookie = getSessionCookie(loginRes);
 
   // Request percakapan dengan cookie
   const convRes = await fetch(`${baseUrl}/api/conversations`, {
@@ -189,9 +200,7 @@ test("Akun baru di DB dapat dibuat dan langsung bisa login", async () => {
   });
   assert.equal(loginRes.status, 200);
 
-  const cookieHeader = loginRes.headers.get("set-cookie");
-  assert.ok(cookieHeader);
-  const sessionCookie = cookieHeader.split(";")[0];
+  const sessionCookie = getSessionCookie(loginRes);
 
   const meRes = await fetch(`${baseUrl}/api/me`, {
     headers: { cookie: sessionCookie },
@@ -208,7 +217,7 @@ test("Ganti password akun via /api/change-password memperbarui kredensial di dat
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ username: "admin", password: "admin123" }),
   });
-  const sessionCookie = loginRes.headers.get("set-cookie")!.split(";")[0];
+  const sessionCookie = getSessionCookie(loginRes);
 
   // Ganti password
   const changeRes = await fetch(`${baseUrl}/api/change-password`, {
@@ -233,4 +242,171 @@ test("Ganti password akun via /api/change-password memperbarui kredensial di dat
     body: JSON.stringify({ username: "admin", password: "newAdminPassword456" }),
   });
   assert.equal(newLoginRes.status, 200);
+});
+
+test("Unread count dan status baca: pesan baru masuk berstatus belum dibaca, bisa ditandai read dan unread", async () => {
+  // Login dengan admin
+  const loginRes = await fetch(`${baseUrl}/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: "admin", password: "newAdminPassword456" }),
+  });
+  const sessionCookie = getSessionCookie(loginRes);
+
+  // Pastikan percakapan dari tes pertama memiliki unread_count = 1
+  const convsRes = await fetch(`${baseUrl}/api/conversations`, {
+    headers: { cookie: sessionCookie },
+  });
+  assert.equal(convsRes.status, 200);
+  const convs = (await convsRes.json()) as any[];
+  const contact = convs.find((c: any) => c.contact_identifier === "13557825698");
+  assert.ok(contact);
+  assert.equal(contact.unread_count, 1);
+
+  // Panggil endpoint /api/conversations/:contact/read
+  const readRes = await fetch(`${baseUrl}/api/conversations/13557825698/read`, {
+    method: "POST",
+    headers: { cookie: sessionCookie },
+  });
+  assert.equal(readRes.status, 200);
+  const readData = (await readRes.json()) as any;
+  assert.equal(readData.ok, true);
+  assert.equal(readData.markedCount, 1);
+
+  // Cek lagi /api/conversations -> unread_count harus menjadi 0
+  const convsAfterRead = (await (
+    await fetch(`${baseUrl}/api/conversations`, { headers: { cookie: sessionCookie } })
+  ).json()) as any[];
+  const contactAfterRead = convsAfterRead.find((c: any) => c.contact_identifier === "13557825698");
+  assert.ok(contactAfterRead);
+  assert.equal(contactAfterRead.unread_count, 0);
+
+  // Cek detail pesan -> is_read harus true
+  const msgsRes = await fetch(`${baseUrl}/api/messages?contact=13557825698`, {
+    headers: { cookie: sessionCookie },
+  });
+  const msgs = (await msgsRes.json()) as any[];
+  assert.ok(msgs[0]);
+  assert.equal(msgs[0].is_read, true);
+  assert.ok(msgs[0].read_at);
+
+  // Panggil endpoint /api/conversations/:contact/unread
+  const unreadRes = await fetch(`${baseUrl}/api/conversations/13557825698/unread`, {
+    method: "POST",
+    headers: { cookie: sessionCookie },
+  });
+  assert.equal(unreadRes.status, 200);
+  const unreadData = (await unreadRes.json()) as any;
+  assert.equal(unreadData.ok, true);
+
+  // Cek lagi /api/conversations -> unread_count harus kembali menjadi 1
+  const convsAfterUnread = (await (
+    await fetch(`${baseUrl}/api/conversations`, { headers: { cookie: sessionCookie } })
+  ).json()) as any[];
+  const contactAfterUnread = convsAfterUnread.find((c: any) => c.contact_identifier === "13557825698");
+  assert.ok(contactAfterUnread);
+  assert.equal(contactAfterUnread.unread_count, 1);
+});
+
+test("sendMarkAsReadToMeta: fungsi helper Meta Graph API menangani pengiriman dan graceful fallback", async () => {
+  // Test fallback ketika token belum dikonfigurasi
+  const resultWithoutToken = await sendMarkAsReadToMeta(
+    { metaAccessToken: undefined, metaPhoneNumberId: "12345" },
+    logger,
+    { messageId: "wamid.test123" }
+  );
+  assert.equal(resultWithoutToken.success, false);
+  assert.equal(resultWithoutToken.skipped, true);
+  assert.equal(resultWithoutToken.reason, "META_ACCESS_TOKEN_NOT_CONFIGURED");
+
+  // Test fallback ketika phone number id tidak ada
+  const resultWithoutPhone = await sendMarkAsReadToMeta(
+    { metaAccessToken: "test_token", metaPhoneNumberId: undefined },
+    logger,
+    { messageId: "wamid.test123" }
+  );
+  assert.equal(resultWithoutPhone.success, false);
+  assert.equal(resultWithoutPhone.skipped, true);
+  assert.equal(resultWithoutPhone.reason, "PHONE_NUMBER_ID_MISSING");
+});
+
+test("sendTextMessageToMeta & sendMediaMessageToMeta: graceful fallback saat token/phone id tidak diset", async () => {
+  const textRes = await sendTextMessageToMeta(
+    { metaAccessToken: undefined, metaPhoneNumberId: "123" },
+    logger,
+    { to: "123456", body: "Halo" }
+  );
+  assert.equal(textRes.success, false);
+  assert.equal(textRes.skipped, true);
+
+  const mediaRes = await sendMediaMessageToMeta(
+    { metaAccessToken: undefined, metaPhoneNumberId: "123" },
+    logger,
+    { to: "123456", filePath: "dummy", mimeType: "image/png", filename: "test.png" }
+  );
+  assert.equal(mediaRes.success, false);
+  assert.equal(mediaRes.skipped, true);
+});
+
+test("API /api/messages/send: Mengirim pesan balasan teks dan pesan file berhasil disimpan dan tampil di histori", async () => {
+  // Login dengan admin
+  const loginRes = await fetch(`${baseUrl}/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: "admin", password: "newAdminPassword456" }),
+  });
+  const sessionCookie = getSessionCookie(loginRes);
+
+  // 1. Kirim pesan teks balasan
+  const sendForm = new FormData();
+  sendForm.append("contact", "13557825698");
+  sendForm.append("message", "Halo ini balasan dari admin!");
+
+  const sendTextRes = await fetch(`${baseUrl}/api/messages/send`, {
+    method: "POST",
+    headers: { cookie: sessionCookie },
+    body: sendForm,
+  });
+  assert.equal(sendTextRes.status, 200);
+  const textData = (await sendTextRes.json()) as any;
+  assert.equal(textData.ok, true);
+  assert.equal(textData.message.body, "Halo ini balasan dari admin!");
+  assert.equal(textData.message.direction, "outbound");
+
+  // 2. Kirim pesan dengan lampiran file
+  const fileContent = "Isi file dokumen penawaran harga...";
+  const blob = new Blob([fileContent], { type: "text/plain" });
+
+  const sendFileForm = new FormData();
+  sendFileForm.append("contact", "13557825698");
+  sendFileForm.append("message", "Silakan cek penawaran kami:");
+  sendFileForm.append("file", blob, "penawaran.txt");
+
+  const sendFileRes = await fetch(`${baseUrl}/api/messages/send`, {
+    method: "POST",
+    headers: { cookie: sessionCookie },
+    body: sendFileForm,
+  });
+  assert.equal(sendFileRes.status, 200);
+  const fileData = (await sendFileRes.json()) as any;
+  assert.equal(fileData.ok, true);
+  assert.equal(fileData.message.direction, "outbound");
+  assert.ok(fileData.message.media_url);
+  assert.equal(fileData.message.message_type, "document");
+
+  // 3. Verifikasi histori percakapan kontak
+  const msgsRes = await fetch(`${baseUrl}/api/messages?contact=13557825698`, {
+    headers: { cookie: sessionCookie },
+  });
+  assert.equal(msgsRes.status, 200);
+  const messages = (await msgsRes.json()) as any[];
+  assert.ok(messages.length >= 3); // 1 pesan masuk + 2 pesan keluar
+
+  const outboundMsgs = messages.filter((m: any) => m.direction === "outbound");
+  assert.equal(outboundMsgs.length, 2);
+  assert.ok(outboundMsgs[0]);
+  assert.ok(outboundMsgs[1]);
+  assert.equal(outboundMsgs[0].body, "Halo ini balasan dari admin!");
+  assert.equal(outboundMsgs[1].body, "Silakan cek penawaran kami:");
+  assert.ok(outboundMsgs[1].media_url);
 });

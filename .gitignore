@@ -4,4 +4,6 @@ dist/
 .env.*
 !.env.example
 *.log
+public/uploads/*
+!public/uploads/.gitkeep
 .DS_Store

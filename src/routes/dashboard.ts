@@ -1,9 +1,16 @@
+import fs from "node:fs";
 import path from "node:path";
 import { Router } from "express";
+import multer from "multer";
 import type { Config } from "../config";
 import type { Logger } from "../logger";
 import type { MessageRepository } from "../db/repository";
 import { createAuthMiddleware } from "../middleware/auth";
+import {
+  sendMarkAsReadToMeta,
+  sendMediaMessageToMeta,
+  sendTextMessageToMeta,
+} from "../services/meta-api";
 
 export function createDashboardRouter(deps: {
   config: Config;
@@ -15,6 +22,27 @@ export function createDashboardRouter(deps: {
   const requireAuth = createAuthMiddleware(config, repository);
 
   const publicDir = path.join(__dirname, "../../public");
+
+  const uploadDir = path.join(__dirname, "../../public/uploads");
+  if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+  }
+
+  const storage = multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      cb(null, uploadDir);
+    },
+    filename: (_req, file, cb) => {
+      const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+      const ext = path.extname(file.originalname);
+      cb(null, `wa-${uniqueSuffix}${ext}`);
+    },
+  });
+
+  const upload = multer({
+    storage,
+    limits: { fileSize: 30 * 1024 * 1024 }, // 30 MB
+  });
 
   // Halaman utama WhatsApp Web View (wajib login)
   router.get("/", requireAuth, (_req, res) => {
@@ -77,6 +105,187 @@ export function createDashboardRouter(deps: {
     } catch (err) {
       logger.error({ err, contact }, "Gagal mengambil pesan untuk kontak");
       res.status(500).json({ error: "Gagal mengambil pesan" });
+    }
+  });
+
+  // API mengirim / membalas pesan (teks & file/media)
+  router.post(
+    "/api/messages/send",
+    requireAuth,
+    upload.single("file"),
+    async (req, res) => {
+      const contact = String(req.body.contact || "").trim();
+      const textMessage = String(req.body.message || "").trim();
+      const file = req.file;
+
+      if (!contact) {
+        res.status(400).json({ error: "Parameter contact penerima wajib diisi" });
+        return;
+      }
+
+      if (!textMessage && !file) {
+        res.status(400).json({ error: "Pesan teks atau file lampiran wajib disertakan" });
+        return;
+      }
+
+      try {
+        // Ambil detail kontak dan phone_number_id dari histori pesan
+        const existingMessages = await repository.getMessagesByContact(contact);
+        const incomingMsgs = existingMessages.filter((m) => m.direction !== "outbound");
+        const latestIncoming = incomingMsgs[incomingMsgs.length - 1];
+
+        const phoneNumberId =
+          latestIncoming?.phone_number_id || config.metaPhoneNumberId || null;
+        const contactName = latestIncoming?.contact_name || contact;
+        const toNumber = latestIncoming?.from_number || contact;
+
+        if (file) {
+          // 1. Pengiriman pesan file/media
+          let messageType = "document";
+          if (file.mimetype.startsWith("image/")) messageType = "image";
+          else if (file.mimetype.startsWith("video/")) messageType = "video";
+          else if (file.mimetype.startsWith("audio/")) messageType = "audio";
+
+          const metaResult = await sendMediaMessageToMeta(config, logger, {
+            phoneNumberId,
+            to: toNumber,
+            filePath: file.path,
+            mimeType: file.mimetype,
+            filename: file.originalname,
+            caption: textMessage || undefined,
+          });
+
+          const savedMessage = await repository.saveOutboundMessage({
+            id: metaResult.messageId,
+            toNumber,
+            fromNumber: "me",
+            phoneNumberId,
+            contactWaId: contact,
+            contactName,
+            messageType,
+            body: textMessage || file.originalname,
+            mediaUrl: `/uploads/${file.filename}`,
+            status: metaResult.success ? "sent" : "sent",
+            rawPayload: {
+              file: {
+                filename: file.filename,
+                originalname: file.originalname,
+                mimetype: file.mimetype,
+                size: file.size,
+              },
+              meta: metaResult,
+            },
+          });
+
+          res.json({ ok: true, message: savedMessage, meta: metaResult });
+        } else {
+          // 2. Pengiriman pesan teks
+          const metaResult = await sendTextMessageToMeta(config, logger, {
+            phoneNumberId,
+            to: toNumber,
+            body: textMessage,
+          });
+
+          const savedMessage = await repository.saveOutboundMessage({
+            id: metaResult.messageId,
+            toNumber,
+            fromNumber: "me",
+            phoneNumberId,
+            contactWaId: contact,
+            contactName,
+            messageType: "text",
+            body: textMessage,
+            mediaUrl: null,
+            status: metaResult.success ? "sent" : "sent",
+            rawPayload: {
+              meta: metaResult,
+            },
+          });
+
+          res.json({ ok: true, message: savedMessage, meta: metaResult });
+        }
+      } catch (err) {
+        logger.error({ err, contact }, "Gagal mengirim / membalas pesan");
+        res.status(500).json({ error: "Gagal mengirim pesan" });
+      }
+    }
+  );
+
+  // API menandai seluruh pesan percakapan sebagai sudah dibaca + kirim read receipt ke Meta
+  router.post("/api/conversations/:contact/read", requireAuth, async (req, res) => {
+    const contact = String(req.params.contact || "");
+    if (!contact) {
+      res.status(400).json({ error: "Parameter contact wajib diisi" });
+      return;
+    }
+
+    try {
+      const updatedMessages = await repository.markConversationAsRead(contact);
+
+      // Meta Cloud API: Pada 1-on-1 chat, menandai pesan terakhir sebagai read
+      // otomatis menandai seluruh pesan sebelumnya sebagai terbaca (centang dua biru).
+      if (updatedMessages.length > 0) {
+        const latestMsg = updatedMessages[updatedMessages.length - 1];
+        if (latestMsg) {
+          sendMarkAsReadToMeta(config, logger, {
+            phoneNumberId: latestMsg.phone_number_id,
+            messageId: latestMsg.id,
+          }).catch((err) => {
+            logger.warn({ err, messageId: latestMsg.id }, "Gagal mengirim mark as read ke Meta Graph API");
+          });
+        }
+      }
+
+      res.json({ ok: true, markedCount: updatedMessages.length });
+    } catch (err) {
+      logger.error({ err, contact }, "Gagal menandai percakapan sudah dibaca");
+      res.status(500).json({ error: "Gagal menandai pesan sudah dibaca" });
+    }
+  });
+
+  // API menandai percakapan sebagai belum dibaca (set is_read = false pada pesan terakhir)
+  router.post("/api/conversations/:contact/unread", requireAuth, async (req, res) => {
+    const contact = String(req.params.contact || "");
+    if (!contact) {
+      res.status(400).json({ error: "Parameter contact wajib diisi" });
+      return;
+    }
+
+    try {
+      const ok = await repository.markConversationAsUnread(contact);
+      res.json({ ok });
+    } catch (err) {
+      logger.error({ err, contact }, "Gagal menandai percakapan belum dibaca");
+      res.status(500).json({ error: "Gagal menandai pesan belum dibaca" });
+    }
+  });
+
+  // API menandai satu pesan tertentu sebagai sudah dibaca
+  router.patch("/api/messages/:id/read", requireAuth, async (req, res) => {
+    const messageId = String(req.params.id || "");
+    if (!messageId) {
+      res.status(400).json({ error: "ID pesan wajib diisi" });
+      return;
+    }
+
+    try {
+      const msg = await repository.markMessageAsRead(messageId);
+      if (!msg) {
+        res.status(404).json({ error: "Pesan tidak ditemukan" });
+        return;
+      }
+
+      sendMarkAsReadToMeta(config, logger, {
+        phoneNumberId: msg.phone_number_id,
+        messageId: msg.id,
+      }).catch((err) => {
+        logger.warn({ err, messageId: msg.id }, "Gagal mengirim mark as read ke Meta Graph API");
+      });
+
+      res.json({ ok: true, message: msg });
+    } catch (err) {
+      logger.error({ err, messageId }, "Gagal menandai pesan sudah dibaca");
+      res.status(500).json({ error: "Gagal menandai pesan" });
     }
   });
 
