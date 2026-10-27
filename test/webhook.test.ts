@@ -16,6 +16,7 @@ const config: Config = {
   logLevel: "silent",
   verifyToken: "token-rahasia",
   appSecret: "app-secret-test",
+  sessionSecret: "test-session-secret",
 };
 
 const logger = pino({ level: "silent" });
@@ -47,7 +48,7 @@ before(async () => {
     processPayload: createPayloadProcessor({ dedup, handlers }),
   });
   await new Promise<void>((resolve) => {
-    server = app.listen(0, resolve);
+    server = app.listen(0, () => resolve());
   });
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
