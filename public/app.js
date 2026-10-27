@@ -34,7 +34,7 @@
 
   let selectedFile = null;
 
-  // Modal Elemen
+  // Modal Detail Payload Elemen
   const payloadModalEl = document.getElementById("payload-modal");
   const btnModalCloseX = document.getElementById("btn-modal-close-x");
   const btnModalClose = document.getElementById("btn-modal-close");
@@ -82,13 +82,32 @@
     return date.toLocaleString();
   }
 
+  // Update Status Koneksi di UI Sidebar
+  function updateConnectionStatus(isOnline) {
+    const statusDot = document.querySelector(".sidebar-header .status-dot");
+    const statusText = document.querySelector(".sidebar-header .status-pill span:last-child");
+    if (statusDot && statusText) {
+      statusDot.classList.toggle("status-offline", !isOnline);
+      if (isOnline) {
+        statusText.textContent = "Live (3s)";
+        statusText.style.color = "#008069";
+      } else {
+        statusText.textContent = "Terputus";
+        statusText.style.color = "#dc2626";
+      }
+    }
+  }
+
   // Ambil Data Profil Pengguna
   async function loadMe() {
     try {
       const res = await fetch("/api/me");
       if (res.status === 401) {
-        window.location.href = "/login";
+        window.location.href = "/login?error=session_expired";
         return;
+      }
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
       }
       const data = await res.json();
       if (data.username) {
@@ -96,22 +115,52 @@
         currentUserAvatarEl.textContent = data.username.slice(0, 1).toUpperCase();
       }
     } catch (err) {
-      console.error("Gagal load profile:", err);
+      console.warn("Gagal memuat profil admin:", err);
     }
   }
 
   // Ambil Daftar Percakapan
-  async function loadConversations() {
+  async function loadConversations(isManual = false) {
     try {
       const res = await fetch("/api/conversations");
       if (res.status === 401) {
-        window.location.href = "/login";
+        window.location.href = "/login?error=session_expired";
         return;
       }
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || `HTTP ${res.status}`);
+      }
+
       conversations = await res.json();
+      updateConnectionStatus(true);
       renderConversationList();
     } catch (err) {
       console.error("Gagal mengambil percakapan:", err);
+      updateConnectionStatus(false);
+
+      if (conversations.length === 0) {
+        conversationListEl.innerHTML = `
+          <div class="list-error-banner">
+            <div>⚠️ <strong>Gagal memuat percakapan</strong></div>
+            <div style="font-size: 12px; margin-top: 4px; color: #7f1d1d;">${escapeHtml(err.message || "Koneksi terputus ke server")}</div>
+            <button class="btn-retry" id="btn-retry-conv">
+              🔄 Coba Lagi
+            </button>
+          </div>
+        `;
+        const retryBtn = document.getElementById("btn-retry-conv");
+        if (retryBtn) {
+          retryBtn.addEventListener("click", () => loadConversations(true));
+        }
+      }
+
+      if (isManual && window.showErrorModal) {
+        window.showErrorModal(
+          `Tidak dapat terhubung ke server untuk memuat percakapan WhatsApp: ${err.message}`,
+          { title: "Koneksi Gagal" }
+        );
+      }
     }
   }
 
@@ -148,7 +197,7 @@
         const hasUnread = Boolean(item.unread_count && item.unread_count > 0);
 
         return `
-          <div class="conversation-item ${isActive ? "active" : ""} ${hasUnread ? "has-unread" : ""}" data-id="${item.contact_identifier}">
+          <div class="conversation-item ${isActive ? "active" : ""} ${hasUnread ? "has-unread" : ""}" data-id="${escapeHtml(item.contact_identifier)}">
             <div class="contact-avatar">${escapeHtml(initials)}</div>
             <div class="conversation-details">
               <div class="contact-header">
@@ -162,8 +211,8 @@
                   <div class="conv-actions">
                     ${
                       hasUnread
-                        ? `<button class="btn-conv-action btn-item-read" data-id="${item.contact_identifier}" title="Tandai Sudah Dibaca">✓ Dibaca</button>`
-                        : `<button class="btn-conv-action btn-item-unread" data-id="${item.contact_identifier}" title="Tandai Belum Dibaca">✉️ Belum</button>`
+                        ? `<button class="btn-conv-action btn-item-read" data-id="${escapeHtml(item.contact_identifier)}" title="Tandai Sudah Dibaca">✓ Dibaca</button>`
+                        : `<button class="btn-conv-action btn-item-unread" data-id="${escapeHtml(item.contact_identifier)}" title="Tandai Belum Dibaca">✉️ Belum</button>`
                     }
                   </div>
                 </div>
@@ -204,12 +253,26 @@
   async function markAsRead(contactId) {
     if (!contactId) return;
     try {
-      await fetch(`/api/conversations/${encodeURIComponent(contactId)}/read`, { method: "POST" });
+      const res = await fetch(`/api/conversations/${encodeURIComponent(contactId)}/read`, { method: "POST" });
+      if (res.status === 401) {
+        window.location.href = "/login?error=session_expired";
+        return;
+      }
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `HTTP ${res.status}`);
+      }
       const conv = conversations.find((c) => c.contact_identifier === contactId);
       if (conv) conv.unread_count = 0;
       renderConversationList();
     } catch (err) {
       console.error("Gagal menandai sudah dibaca:", err);
+      if (window.showErrorModal) {
+        window.showErrorModal(
+          `Gagal memperbarui status baca percakapan: ${err.message || "Koneksi terputus"}`,
+          { title: "Gagal Mengubah Status" }
+        );
+      }
     }
   }
 
@@ -217,12 +280,26 @@
   async function markAsUnread(contactId) {
     if (!contactId) return;
     try {
-      await fetch(`/api/conversations/${encodeURIComponent(contactId)}/unread`, { method: "POST" });
+      const res = await fetch(`/api/conversations/${encodeURIComponent(contactId)}/unread`, { method: "POST" });
+      if (res.status === 401) {
+        window.location.href = "/login?error=session_expired";
+        return;
+      }
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `HTTP ${res.status}`);
+      }
       const conv = conversations.find((c) => c.contact_identifier === contactId);
       if (conv) conv.unread_count = Math.max(1, (conv.unread_count || 0) + 1);
       renderConversationList();
     } catch (err) {
       console.error("Gagal menandai belum dibaca:", err);
+      if (window.showErrorModal) {
+        window.showErrorModal(
+          `Gagal menandai percakapan sebagai belum dibaca: ${err.message || "Koneksi terputus"}`,
+          { title: "Gagal Mengubah Status" }
+        );
+      }
     }
   }
 
@@ -260,9 +337,14 @@
     try {
       const res = await fetch(`/api/messages?contact=${encodeURIComponent(activeContactId)}`);
       if (res.status === 401) {
-        window.location.href = "/login";
+        window.location.href = "/login?error=session_expired";
         return;
       }
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `HTTP ${res.status}`);
+      }
+
       const messages = await res.json();
       activeMessages = messages;
 
@@ -286,6 +368,21 @@
       }
     } catch (err) {
       console.error("Gagal mengambil pesan:", err);
+      if (activeMessages.length === 0) {
+        messagesContainerEl.innerHTML = `
+          <div class="list-error-banner" style="margin: 32px auto; max-width: 360px;">
+            <div>⚠️ <strong>Gagal memuat pesan</strong></div>
+            <div style="font-size: 12px; margin: 4px 0 8px; color: #7f1d1d;">${escapeHtml(err.message || "Server tidak merespons")}</div>
+            <button class="btn-retry" id="btn-retry-messages">
+              🔄 Coba Lagi
+            </button>
+          </div>
+        `;
+        const retryBtn = document.getElementById("btn-retry-messages");
+        if (retryBtn) {
+          retryBtn.addEventListener("click", () => loadMessages(true));
+        }
+      }
     }
   }
 
@@ -293,7 +390,7 @@
   function renderMessages() {
     if (activeMessages.length === 0) {
       messagesContainerEl.innerHTML = `
-        <div class="date-divider">Tidak ada pesan</div>
+        <div class="date-divider">Tidak ada riwayat pesan</div>
       `;
       return;
     }
@@ -324,11 +421,13 @@
         htmlParts.push(`<div class="unread-divider"><span>PESAN BELUM DIBACA</span></div>`);
       }
 
-      const timeStr = msgDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const timeStr = isNaN(msgDate.getTime())
+        ? ""
+        : msgDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       const isOutbound = msg.direction === "outbound" || msg.from_number === "me";
       const senderName = isOutbound ? "Anda" : (msg.contact_name || msg.from_number);
 
-      // Status centang pesan WhatsApp (✓, ✓✓ abu, ✓✓ biru)
+      // Status centang pesan WhatsApp
       let tickHtml = "";
       if (msg.status === "read" || msg.is_read) {
         tickHtml = `<span class="msg-status-tick tick-read" title="Sudah Dibaca (Read)">✓✓</span>`;
@@ -340,7 +439,7 @@
         tickHtml = `<span class="msg-status-tick" style="color: #ea0038;" title="Gagal Terkirim">!</span>`;
       }
 
-      // Render media (gambar atau dokumen/file lain)
+      // Render media
       let mediaHtml = "";
       if (msg.media_url) {
         const isImage = msg.message_type === "image" || /\.(png|jpe?g|gif|webp)$/i.test(msg.media_url);
@@ -397,6 +496,15 @@
 
   // Buka Modal Payload
   function openPayloadModal(msg) {
+    if (!msg) {
+      if (window.showWarningModal) {
+        window.showWarningModal("Data pesan tidak valid atau belum tersedia.", {
+          title: "Payload Tidak Ditemukan",
+        });
+      }
+      return;
+    }
+
     modalMsgId.textContent = msg.id || "-";
     modalFromNumber.textContent = msg.from_number || "-";
     modalContactInfo.textContent = `${msg.contact_name || "-"} (WA ID: ${msg.contact_wa_id || msg.from_number})`;
@@ -424,11 +532,16 @@
         btnCopyJson.textContent = originalText;
       }, 2000);
     } catch (err) {
-      alert("Gagal menyalin ke clipboard");
+      if (window.showErrorModal) {
+        window.showErrorModal(
+          "Gagal menyalin format JSON ke clipboard browser. Pastikan izin akses clipboard telah diizinkan.",
+          { title: "Gagal Menyalin" }
+        );
+      }
     }
   });
 
-  // Event Listeners Modal
+  // Event Listeners Modal Payload
   btnModalCloseX.addEventListener("click", closePayloadModal);
   btnModalClose.addEventListener("click", closePayloadModal);
   payloadModalEl.addEventListener("click", (e) => {
@@ -445,7 +558,12 @@
   if (btnToggleUnreadEl) {
     btnToggleUnreadEl.addEventListener("click", async () => {
       if (!activeContactId) {
-        alert("Belum ada chat yang dipilih");
+        if (window.showWarningModal) {
+          window.showWarningModal(
+            "Silakan pilih salah satu percakapan di sebelah kiri terlebih dahulu sebelum menandai belum dibaca.",
+            { title: "Percakapan Belum Dipilih" }
+          );
+        }
         return;
       }
       manualUnreadContactId = activeContactId;
@@ -463,10 +581,29 @@
   }
 
   // Event Listener Pemilihan File
+  const MAX_FILE_SIZE = 30 * 1024 * 1024; // 30 MB
+
   if (chatFileInputEl && filePreviewBarEl) {
     chatFileInputEl.addEventListener("change", () => {
       if (chatFileInputEl.files && chatFileInputEl.files[0]) {
-        selectedFile = chatFileInputEl.files[0];
+        const file = chatFileInputEl.files[0];
+
+        // Validasi ukuran file di sisi klien
+        if (file.size > MAX_FILE_SIZE) {
+          chatFileInputEl.value = "";
+          selectedFile = null;
+          filePreviewBarEl.style.display = "none";
+
+          if (window.showErrorModal) {
+            window.showErrorModal(
+              `Ukuran file "${file.name}" (${formatFileSize(file.size)}) melebihi batas upload maksimal 30 MB. Silakan pilih berkas yang lebih kecil atau kompres terlebih dahulu.`,
+              { title: "Ukuran File Terlalu Besar" }
+            );
+          }
+          return;
+        }
+
+        selectedFile = file;
         filePreviewNameEl.textContent = selectedFile.name;
         filePreviewSizeEl.textContent = formatFileSize(selectedFile.size);
         filePreviewIconEl.textContent = selectedFile.type.startsWith("image/") ? "📷" : "📄";
@@ -497,17 +634,32 @@
 
     chatInputFormEl.addEventListener("submit", async (e) => {
       e.preventDefault();
+
       if (!activeContactId) {
-        alert("Pilih percakapan terlebih dahulu");
+        if (window.showWarningModal) {
+          window.showWarningModal(
+            "Silakan pilih salah satu percakapan di panel sebelah kiri terlebih dahulu sebelum mengirim pesan.",
+            { title: "Pilih Percakapan" }
+          );
+        }
         return;
       }
 
       const text = chatMessageInputEl.value.trim();
       if (!text && !selectedFile) {
+        if (window.showWarningModal) {
+          window.showWarningModal(
+            "Ketik pesan teks atau lampirkan berkas terlebih dahulu sebelum menekan tombol kirim.",
+            { title: "Pesan Masih Kosong" }
+          );
+        }
         return;
       }
 
-      if (btnSendMessageEl) btnSendMessageEl.disabled = true;
+      if (btnSendMessageEl) {
+        btnSendMessageEl.disabled = true;
+        btnSendMessageEl.style.opacity = "0.6";
+      }
 
       try {
         const formData = new FormData();
@@ -520,10 +672,33 @@
           body: formData,
         });
 
+        if (res.status === 401) {
+          window.location.href = "/login?error=session_expired";
+          return;
+        }
+
         const data = await res.json().catch(() => ({}));
 
         if (!res.ok) {
-          alert("Gagal mengirim pesan: " + (data.error || res.statusText));
+          let errorMsg = data.error;
+          if (!errorMsg) {
+            if (res.status === 413) {
+              errorMsg = "Ukuran file terlalu besar untuk diproses server.";
+            } else if (res.status === 400) {
+              errorMsg = "Data pesan atau kontak yang dikirim tidak valid.";
+            } else if (res.status === 500) {
+              errorMsg = "Terjadi kegagalan pada server saat memproses pengiriman pesan.";
+            } else {
+              errorMsg = `Gagal mengirim pesan (HTTP ${res.status} ${res.statusText})`;
+            }
+          }
+
+          if (window.showErrorModal) {
+            window.showErrorModal(errorMsg, {
+              title: "Gagal Mengirim Pesan",
+              details: data,
+            });
+          }
           return;
         }
 
@@ -538,9 +713,20 @@
         await loadConversations();
       } catch (err) {
         console.error("Gagal mengirim pesan:", err);
-        alert("Terjadi kesalahan saat mengirim pesan.");
+        if (window.showErrorModal) {
+          window.showErrorModal(
+            "Terjadi gangguan jaringan atau server saat mencoba mengirim pesan. Silakan periksa koneksi internet Anda dan coba lagi.",
+            {
+              title: "Kesalahan Jaringan",
+              details: err.stack || err.toString(),
+            }
+          );
+        }
       } finally {
-        if (btnSendMessageEl) btnSendMessageEl.disabled = false;
+        if (btnSendMessageEl) {
+          btnSendMessageEl.disabled = false;
+          btnSendMessageEl.style.opacity = "1";
+        }
         chatMessageInputEl.focus();
       }
     });
@@ -551,7 +737,12 @@
     if (activeMessages.length > 0) {
       openPayloadModal(activeMessages[activeMessages.length - 1]);
     } else {
-      alert("Belum ada pesan yang dipilih.");
+      if (window.showInfoModal) {
+        window.showInfoModal(
+          "Belum ada riwayat pesan dalam percakapan ini untuk melihat detail raw JSON payload.",
+          { title: "Tidak Ada Data Pesan" }
+        );
+      }
     }
   });
 
@@ -592,6 +783,7 @@
       pwdAlert.style.display = "none";
       formChangePassword.reset();
       passwordModalEl.style.display = "flex";
+      inputCurrPwd.focus();
     });
 
     const closePwdModal = () => {
@@ -608,17 +800,47 @@
       e.preventDefault();
       pwdAlert.style.display = "none";
 
+      const currPwd = inputCurrPwd.value;
+      const newPwd = inputNewPwd.value;
+
+      if (!currPwd) {
+        pwdAlert.style.backgroundColor = "#fee2e2";
+        pwdAlert.style.color = "#991b1b";
+        pwdAlert.textContent = "Password saat ini wajib diisi";
+        pwdAlert.style.display = "block";
+        inputCurrPwd.focus();
+        return;
+      }
+
+      if (!newPwd || newPwd.length < 6) {
+        pwdAlert.style.backgroundColor = "#fee2e2";
+        pwdAlert.style.color = "#991b1b";
+        pwdAlert.textContent = "Password baru minimal harus 6 karakter";
+        pwdAlert.style.display = "block";
+        inputNewPwd.focus();
+        return;
+      }
+
+      if (currPwd === newPwd) {
+        pwdAlert.style.backgroundColor = "#fee2e2";
+        pwdAlert.style.color = "#991b1b";
+        pwdAlert.textContent = "Password baru tidak boleh sama dengan password saat ini";
+        pwdAlert.style.display = "block";
+        inputNewPwd.focus();
+        return;
+      }
+
       try {
         const res = await fetch("/api/change-password", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            currentPassword: inputCurrPwd.value,
-            newPassword: inputNewPwd.value,
+            currentPassword: currPwd,
+            newPassword: newPwd,
           }),
         });
 
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         if (res.ok) {
           pwdAlert.style.backgroundColor = "#dcf8c6";
           pwdAlert.style.color = "#075e54";
@@ -628,13 +850,13 @@
         } else {
           pwdAlert.style.backgroundColor = "#fee2e2";
           pwdAlert.style.color = "#991b1b";
-          pwdAlert.textContent = data.error || "Gagal mengubah password";
+          pwdAlert.textContent = data.error || "Gagal mengubah password akun";
           pwdAlert.style.display = "block";
         }
       } catch (err) {
         pwdAlert.style.backgroundColor = "#fee2e2";
         pwdAlert.style.color = "#991b1b";
-        pwdAlert.textContent = "Terjadi kesalahan server";
+        pwdAlert.textContent = "Terjadi gangguan jaringan atau server. Silakan coba lagi.";
         pwdAlert.style.display = "block";
       }
     });

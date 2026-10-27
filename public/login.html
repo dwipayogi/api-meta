@@ -114,15 +114,6 @@
       margin-bottom: 18px;
       display: none;
     }
-    .hint-box {
-      margin-top: 24px;
-      padding: 12px;
-      background: #f0f2f5;
-      border-radius: 6px;
-      font-size: 12px;
-      color: #54656f;
-      line-height: 1.5;
-    }
     .hint-box strong {
       color: #111b21;
     }
@@ -155,20 +146,28 @@
         </div>
         <button type="submit" class="btn-submit">Masuk</button>
       </form>
-
-      <div class="hint-box">
-        💡 <strong>Kredensial Akun (Tersimpan di Database):</strong><br>
-        Username: <code>admin</code><br>
-        Password: <code>admin123</code><br>
-        <em>(Akun disimpan secara terenkripsi scrypt di tabel <code>accounts</code>)</em>
-      </div>
     </div>
   </div>
 
+  <script src="/modal.js"></script>
   <script>
-    if (window.location.search.includes("error=1")) {
-      document.getElementById("error-alert").style.display = "block";
-    }
+    (function() {
+      const params = new URLSearchParams(window.location.search);
+      const err = params.get("error");
+      const alertEl = document.getElementById("error-alert");
+      if (err) {
+        if (err === "session_expired") {
+          alertEl.textContent = "Sesi login Anda telah kedaluwarsa. Silakan masuk kembali.";
+        } else if (err === "missing_fields") {
+          alertEl.textContent = "Username dan password wajib diisi lengkap.";
+        } else if (err === "server_error") {
+          alertEl.textContent = "Terjadi gangguan pada server saat proses autentikasi. Silakan coba lagi.";
+        } else {
+          alertEl.textContent = "Username atau password salah. Silakan periksa kembali.";
+        }
+        alertEl.style.display = "block";
+      }
+    })();
   </script>
 </body>
 </html>

@@ -43,6 +43,14 @@
       .replace(/'/g, "&#039;");
   }
 
+  // Indikator koneksi server
+  function updateSyncStatus(isOnline) {
+    const statusDots = document.querySelectorAll(".status-dot");
+    statusDots.forEach((dot) => {
+      dot.classList.toggle("status-offline", !isOnline);
+    });
+  }
+
   // Ringkasan Isi Payload
   function getPayloadSummary(log) {
     try {
@@ -50,14 +58,14 @@
       if (!p || typeof p !== "object") return "Payload tidak valid";
       const entries = p.entry || [];
       if (entries.length === 0) return p.object || "Meta Event";
-      
+
       const firstEntry = entries[0];
       const changes = firstEntry.changes || [];
       if (changes.length > 0) {
         const val = changes[0].value || {};
         if (val.messages && val.messages.length > 0) {
           const msg = val.messages[0];
-          return `Pesan masuk: "${msg.text?.body || msg.type || 'Pesan'}" dari ${msg.from}`;
+          return `Pesan masuk: "${msg.text?.body || msg.type || "Pesan"}" dari ${msg.from}`;
         }
         if (val.statuses && val.statuses.length > 0) {
           const st = val.statuses[0];
@@ -71,15 +79,21 @@
   }
 
   // Fetch Logs dari API
-  async function fetchLogs() {
+  async function fetchLogs(isManual = false) {
     try {
       const res = await fetch("/api/webhook-logs?limit=100");
       if (res.status === 401) {
-        window.location.href = "/login";
+        window.location.href = "/login?error=session_expired";
         return;
       }
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || `Server merespons status HTTP ${res.status}`);
+      }
+
       logs = await res.json();
       statTotalLogs.textContent = logs.length;
+      updateSyncStatus(true);
       renderLogsList();
 
       if (selectedLogId) {
@@ -88,11 +102,37 @@
           showLogDetail(stillExists);
         }
       } else if (logs.length > 0) {
-        // Auto select first log if none selected
         selectLog(logs[0].id);
       }
     } catch (err) {
       console.error("Gagal mengambil log payload:", err);
+      updateSyncStatus(false);
+
+      if (logs.length === 0) {
+        logsListContainer.innerHTML = `
+          <div class="list-error-banner">
+            <div>⚠️ <strong>Gagal memuat log payload</strong></div>
+            <div style="font-size: 12px; margin-top: 4px; color: #7f1d1d;">${escapeHtml(err.message || "Koneksi terputus ke server")}</div>
+            <button class="btn-retry" id="btn-retry-logs">
+              🔄 Coba Lagi
+            </button>
+          </div>
+        `;
+        const retryBtn = document.getElementById("btn-retry-logs");
+        if (retryBtn) {
+          retryBtn.addEventListener("click", () => fetchLogs(true));
+        }
+      }
+
+      if (isManual && window.showErrorModal) {
+        window.showErrorModal(
+          `Gagal memperbarui riwayat log payload webhook: ${err.message || "Server tidak merespons"}`,
+          {
+            title: "Gagal Sinkronisasi Log",
+            details: err.stack || err.toString(),
+          }
+        );
+      }
     }
   }
 
@@ -185,28 +225,63 @@
 
   // Copy JSON ke Clipboard
   btnCopyLogJson.addEventListener("click", async () => {
+    if (!detailJsonPre.textContent || detailJsonPre.textContent.trim() === "{}") {
+      if (window.showWarningModal) {
+        window.showWarningModal("Pilih log webhook terlebih dahulu untuk menyalin payload JSON.", {
+          title: "Payload Kosong",
+        });
+      }
+      return;
+    }
+
     try {
       await navigator.clipboard.writeText(detailJsonPre.textContent);
       const prev = btnCopyLogJson.textContent;
       btnCopyLogJson.textContent = "✓ Tersalin!";
       setTimeout(() => (btnCopyLogJson.textContent = prev), 2000);
     } catch (e) {
-      alert("Gagal menyalin JSON");
+      if (window.showErrorModal) {
+        window.showErrorModal(
+          "Gagal menyalin format JSON ke clipboard browser. Pastikan izin akses clipboard telah diaktifkan.",
+          { title: "Gagal Menyalin" }
+        );
+      }
     }
   });
 
   // Download File JSON
   btnDownloadLogJson.addEventListener("click", () => {
-    if (!selectedLogId) return;
-    const blob = new Blob([detailJsonPre.textContent], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `webhook-payload-log-${selectedLogId}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    if (!selectedLogId) {
+      if (window.showWarningModal) {
+        window.showWarningModal("Pilih salah satu log webhook di sebelah kiri terlebih dahulu sebelum mengunduh berkas JSON.", {
+          title: "Log Belum Dipilih",
+        });
+      }
+      return;
+    }
+
+    try {
+      const jsonContent = detailJsonPre.textContent;
+      if (!jsonContent) {
+        throw new Error("Konten JSON log tidak ditemukan");
+      }
+      const blob = new Blob([jsonContent], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `webhook-payload-log-${selectedLogId}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      if (window.showErrorModal) {
+        window.showErrorModal(
+          `Terjadi kesalahan saat menyiapkan berkas JSON unduhan: ${err.message || err}`,
+          { title: "Gagal Mengunduh JSON" }
+        );
+      }
+    }
   });
 
   // Search Filter
@@ -217,12 +292,12 @@
 
   // Manual Refresh
   btnManualRefresh.addEventListener("click", () => {
-    fetchLogs();
+    fetchLogs(true);
   });
 
   // Initial Load
   fetchLogs();
 
   // Polling Real-time setiap 3 detik
-  setInterval(fetchLogs, 3000);
+  setInterval(() => fetchLogs(false), 3000);
 })();
