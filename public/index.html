@@ -90,13 +90,22 @@
               <div class="subtitle" id="active-chat-sub">WA: +13557825698</div>
             </div>
           </div>
-          <button class="btn-payload-header" id="btn-view-contact-details">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="11" cy="11" r="8"></circle>
-              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-            </svg>
-            Detail Kontak & Payload
-          </button>
+          <div class="chat-header-actions">
+            <button class="btn-unread-toggle" id="btn-toggle-unread" title="Tandai Percakapan Belum Dibaca">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path>
+                <polyline points="22,6 12,13 2,6"></polyline>
+              </svg>
+              Tandai Belum Dibaca
+            </button>
+            <button class="btn-payload-header" id="btn-view-contact-details">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+              </svg>
+              Detail Kontak & Payload
+            </button>
+          </div>
         </header>
 
         <div class="messages-container" id="messages-container">

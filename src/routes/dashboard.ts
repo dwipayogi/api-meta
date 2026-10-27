@@ -4,6 +4,7 @@ import type { Config } from "../config";
 import type { Logger } from "../logger";
 import type { MessageRepository } from "../db/repository";
 import { createAuthMiddleware } from "../middleware/auth";
+import { sendMarkAsReadToMeta } from "../services/meta-api";
 
 export function createDashboardRouter(deps: {
   config: Config;
@@ -77,6 +78,84 @@ export function createDashboardRouter(deps: {
     } catch (err) {
       logger.error({ err, contact }, "Gagal mengambil pesan untuk kontak");
       res.status(500).json({ error: "Gagal mengambil pesan" });
+    }
+  });
+
+  // API menandai seluruh pesan percakapan sebagai sudah dibaca + kirim read receipt ke Meta
+  router.post("/api/conversations/:contact/read", requireAuth, async (req, res) => {
+    const contact = String(req.params.contact || "");
+    if (!contact) {
+      res.status(400).json({ error: "Parameter contact wajib diisi" });
+      return;
+    }
+
+    try {
+      const updatedMessages = await repository.markConversationAsRead(contact);
+
+      // Meta Cloud API: Pada 1-on-1 chat, menandai pesan terakhir sebagai read
+      // otomatis menandai seluruh pesan sebelumnya sebagai terbaca (centang dua biru).
+      if (updatedMessages.length > 0) {
+        const latestMsg = updatedMessages[updatedMessages.length - 1];
+        if (latestMsg) {
+          sendMarkAsReadToMeta(config, logger, {
+            phoneNumberId: latestMsg.phone_number_id,
+            messageId: latestMsg.id,
+          }).catch((err) => {
+            logger.warn({ err, messageId: latestMsg.id }, "Gagal mengirim mark as read ke Meta Graph API");
+          });
+        }
+      }
+
+      res.json({ ok: true, markedCount: updatedMessages.length });
+    } catch (err) {
+      logger.error({ err, contact }, "Gagal menandai percakapan sudah dibaca");
+      res.status(500).json({ error: "Gagal menandai pesan sudah dibaca" });
+    }
+  });
+
+  // API menandai percakapan sebagai belum dibaca (set is_read = false pada pesan terakhir)
+  router.post("/api/conversations/:contact/unread", requireAuth, async (req, res) => {
+    const contact = String(req.params.contact || "");
+    if (!contact) {
+      res.status(400).json({ error: "Parameter contact wajib diisi" });
+      return;
+    }
+
+    try {
+      const ok = await repository.markConversationAsUnread(contact);
+      res.json({ ok });
+    } catch (err) {
+      logger.error({ err, contact }, "Gagal menandai percakapan belum dibaca");
+      res.status(500).json({ error: "Gagal menandai pesan belum dibaca" });
+    }
+  });
+
+  // API menandai satu pesan tertentu sebagai sudah dibaca
+  router.patch("/api/messages/:id/read", requireAuth, async (req, res) => {
+    const messageId = String(req.params.id || "");
+    if (!messageId) {
+      res.status(400).json({ error: "ID pesan wajib diisi" });
+      return;
+    }
+
+    try {
+      const msg = await repository.markMessageAsRead(messageId);
+      if (!msg) {
+        res.status(404).json({ error: "Pesan tidak ditemukan" });
+        return;
+      }
+
+      sendMarkAsReadToMeta(config, logger, {
+        phoneNumberId: msg.phone_number_id,
+        messageId: msg.id,
+      }).catch((err) => {
+        logger.warn({ err, messageId: msg.id }, "Gagal mengirim mark as read ke Meta Graph API");
+      });
+
+      res.json({ ok: true, message: msg });
+    } catch (err) {
+      logger.error({ err, messageId }, "Gagal menandai pesan sudah dibaca");
+      res.status(500).json({ error: "Gagal menandai pesan" });
     }
   });
 

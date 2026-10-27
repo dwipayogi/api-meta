@@ -10,6 +10,7 @@ import { MemoryMessageRepository } from "../src/db/repository";
 import { createMemoryDedup } from "../src/services/dedup";
 import { createHandlers } from "../src/services/handlers";
 import { createPayloadProcessor } from "../src/services/process-payload";
+import { sendMarkAsReadToMeta } from "../src/services/meta-api";
 
 const config: Config = {
   nodeEnv: "test",
@@ -233,4 +234,87 @@ test("Ganti password akun via /api/change-password memperbarui kredensial di dat
     body: JSON.stringify({ username: "admin", password: "newAdminPassword456" }),
   });
   assert.equal(newLoginRes.status, 200);
+});
+
+test("Unread count dan status baca: pesan baru masuk berstatus belum dibaca, bisa ditandai read dan unread", async () => {
+  // Login dengan admin
+  const loginRes = await fetch(`${baseUrl}/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: "admin", password: "newAdminPassword456" }),
+  });
+  const sessionCookie = loginRes.headers.get("set-cookie")!.split(";")[0];
+
+  // Pastikan percakapan dari tes pertama memiliki unread_count = 1
+  const convsRes = await fetch(`${baseUrl}/api/conversations`, {
+    headers: { cookie: sessionCookie },
+  });
+  assert.equal(convsRes.status, 200);
+  const convs = await convsRes.json();
+  const contact = convs.find((c: any) => c.contact_identifier === "13557825698");
+  assert.ok(contact);
+  assert.equal(contact.unread_count, 1);
+
+  // Panggil endpoint /api/conversations/:contact/read
+  const readRes = await fetch(`${baseUrl}/api/conversations/13557825698/read`, {
+    method: "POST",
+    headers: { cookie: sessionCookie },
+  });
+  assert.equal(readRes.status, 200);
+  const readData = await readRes.json();
+  assert.equal(readData.ok, true);
+  assert.equal(readData.markedCount, 1);
+
+  // Cek lagi /api/conversations -> unread_count harus menjadi 0
+  const convsAfterRead = await (
+    await fetch(`${baseUrl}/api/conversations`, { headers: { cookie: sessionCookie } })
+  ).json();
+  const contactAfterRead = convsAfterRead.find((c: any) => c.contact_identifier === "13557825698");
+  assert.equal(contactAfterRead.unread_count, 0);
+
+  // Cek detail pesan -> is_read harus true
+  const msgsRes = await fetch(`${baseUrl}/api/messages?contact=13557825698`, {
+    headers: { cookie: sessionCookie },
+  });
+  const msgs = await msgsRes.json();
+  assert.equal(msgs[0].is_read, true);
+  assert.ok(msgs[0].read_at);
+
+  // Panggil endpoint /api/conversations/:contact/unread
+  const unreadRes = await fetch(`${baseUrl}/api/conversations/13557825698/unread`, {
+    method: "POST",
+    headers: { cookie: sessionCookie },
+  });
+  assert.equal(unreadRes.status, 200);
+  const unreadData = await unreadRes.json();
+  assert.equal(unreadData.ok, true);
+
+  // Cek lagi /api/conversations -> unread_count harus kembali menjadi 1
+  const convsAfterUnread = await (
+    await fetch(`${baseUrl}/api/conversations`, { headers: { cookie: sessionCookie } })
+  ).json();
+  const contactAfterUnread = convsAfterUnread.find((c: any) => c.contact_identifier === "13557825698");
+  assert.equal(contactAfterUnread.unread_count, 1);
+});
+
+test("sendMarkAsReadToMeta: fungsi helper Meta Graph API menangani pengiriman dan graceful fallback", async () => {
+  // Test fallback ketika token belum dikonfigurasi
+  const resultWithoutToken = await sendMarkAsReadToMeta(
+    { metaAccessToken: undefined, metaPhoneNumberId: "12345" },
+    logger,
+    { messageId: "wamid.test123" }
+  );
+  assert.equal(resultWithoutToken.success, false);
+  assert.equal(resultWithoutToken.skipped, true);
+  assert.equal(resultWithoutToken.reason, "META_ACCESS_TOKEN_NOT_CONFIGURED");
+
+  // Test fallback ketika phone number id tidak ada
+  const resultWithoutPhone = await sendMarkAsReadToMeta(
+    { metaAccessToken: "test_token", metaPhoneNumberId: undefined },
+    logger,
+    { messageId: "wamid.test123" }
+  );
+  assert.equal(resultWithoutPhone.success, false);
+  assert.equal(resultWithoutPhone.skipped, true);
+  assert.equal(resultWithoutPhone.reason, "PHONE_NUMBER_ID_MISSING");
 });

@@ -21,6 +21,8 @@ export interface StoredMessage {
   body: string;
   timestamp: string; // ISO string
   status: string;
+  is_read: boolean;
+  read_at?: string | null;
   raw_payload: unknown;
   created_at: string;
 }
@@ -32,6 +34,7 @@ export interface ConversationSummary {
   last_message: string;
   last_timestamp: string;
   message_count: number;
+  unread_count: number;
 }
 
 export interface WebhookLogItem {
@@ -64,6 +67,9 @@ export interface MessageRepository {
   saveStatus(status: WhatsAppStatus, value: ChangeValue): Promise<void>;
   getConversations(): Promise<ConversationSummary[]>;
   getMessagesByContact(identifier: string): Promise<StoredMessage[]>;
+  markConversationAsRead(identifier: string): Promise<StoredMessage[]>;
+  markConversationAsUnread(identifier: string): Promise<boolean>;
+  markMessageAsRead(messageId: string): Promise<StoredMessage | null>;
   
   // Log Webhook
   saveWebhookLog(input: SaveWebhookLogInput): Promise<void>;
@@ -159,6 +165,8 @@ export class PgMessageRepository implements MessageRepository {
         body TEXT,
         timestamp TIMESTAMPTZ NOT NULL,
         status VARCHAR(64) NOT NULL DEFAULT 'received',
+        is_read BOOLEAN NOT NULL DEFAULT FALSE,
+        read_at TIMESTAMPTZ,
         raw_payload JSONB,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
@@ -166,6 +174,11 @@ export class PgMessageRepository implements MessageRepository {
       CREATE INDEX IF NOT EXISTS idx_messages_from_number ON messages(from_number);
       CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_messages_contact_wa_id ON messages(contact_wa_id);
+
+      -- Auto-migrasi kolom is_read & read_at jika tabel sudah ada sebelumnya
+      ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_read BOOLEAN NOT NULL DEFAULT FALSE;
+      ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ;
+      CREATE INDEX IF NOT EXISTS idx_messages_contact_is_read ON messages(contact_wa_id, is_read);
 
       CREATE TABLE IF NOT EXISTS message_statuses (
         id BIGSERIAL PRIMARY KEY,
@@ -277,9 +290,9 @@ export class PgMessageRepository implements MessageRepository {
       `INSERT INTO messages (
          id, from_number, to_number, phone_number_id,
          contact_wa_id, contact_name, message_type,
-         body, timestamp, status, raw_payload
+         body, timestamp, status, is_read, raw_payload
        ) VALUES (
-         $1, $2, $3, $4, $5, $6, $7, $8, $9, 'received', $10
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, 'received', FALSE, $10
        ) ON CONFLICT (id) DO UPDATE SET
          body = EXCLUDED.body,
          status = EXCLUDED.status,
@@ -328,6 +341,7 @@ export class PgMessageRepository implements MessageRepository {
       last_message: string;
       last_timestamp: string;
       message_count: number;
+      unread_count: number;
     }>(`
       -- Pesan terakhir diambil lewat CTE terpisah (DISTINCT ON), bukan subquery
       -- korelasi di dalam GROUP BY: Postgres menolak subquery yang memakai kolom
@@ -342,7 +356,8 @@ export class PgMessageRepository implements MessageRepository {
           COALESCE(MAX(c.name), MAX(b.contact_name), b.from_number) AS contact_name,
           b.from_number,
           MAX(b.timestamp) AS last_timestamp,
-          COUNT(b.id)::int AS message_count
+          COUNT(b.id)::int AS message_count,
+          COUNT(CASE WHEN b.is_read = FALSE THEN 1 END)::int AS unread_count
         FROM base b
         LEFT JOIN contacts c ON c.wa_id = b.contact_wa_id
         GROUP BY b.contact_identifier, b.from_number
@@ -358,7 +373,8 @@ export class PgMessageRepository implements MessageRepository {
         a.from_number,
         l.body AS last_message,
         a.last_timestamp,
-        a.message_count
+        a.message_count,
+        a.unread_count
       FROM agg a
       LEFT JOIN latest l ON l.contact_identifier = a.contact_identifier
       ORDER BY a.last_timestamp DESC;
@@ -371,11 +387,12 @@ export class PgMessageRepository implements MessageRepository {
       last_message: row.last_message || "",
       last_timestamp: row.last_timestamp ? new Date(row.last_timestamp).toISOString() : "",
       message_count: Number(row.message_count) || 0,
+      unread_count: Number(row.unread_count) || 0,
     }));
   }
 
   async getMessagesByContact(identifier: string): Promise<StoredMessage[]> {
-    const result = await this.pool.query<StoredMessage>(
+    const result = await this.pool.query<any>(
       `SELECT 
          id,
          from_number,
@@ -387,6 +404,8 @@ export class PgMessageRepository implements MessageRepository {
          body,
          timestamp,
          status,
+         is_read,
+         read_at,
          raw_payload,
          created_at
        FROM messages
@@ -397,9 +416,67 @@ export class PgMessageRepository implements MessageRepository {
 
     return result.rows.map((row) => ({
       ...row,
+      is_read: Boolean(row.is_read),
+      read_at: row.read_at ? new Date(row.read_at).toISOString() : null,
       timestamp: new Date(row.timestamp).toISOString(),
       created_at: new Date(row.created_at).toISOString(),
     }));
+  }
+
+  async markConversationAsRead(identifier: string): Promise<StoredMessage[]> {
+    const result = await this.pool.query<any>(
+      `UPDATE messages
+       SET is_read = TRUE, read_at = NOW()
+       WHERE (contact_wa_id = $1 OR from_number = $1) AND is_read = FALSE
+       RETURNING id, from_number, to_number, phone_number_id, contact_wa_id,
+                 contact_name, message_type, body, timestamp, status,
+                 is_read, read_at, raw_payload, created_at`,
+      [identifier]
+    );
+
+    return result.rows.map((row) => ({
+      ...row,
+      is_read: Boolean(row.is_read),
+      read_at: row.read_at ? new Date(row.read_at).toISOString() : null,
+      timestamp: new Date(row.timestamp).toISOString(),
+      created_at: new Date(row.created_at).toISOString(),
+    }));
+  }
+
+  async markConversationAsUnread(identifier: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `UPDATE messages
+       SET is_read = FALSE, read_at = NULL
+       WHERE id = (
+         SELECT id FROM messages
+         WHERE contact_wa_id = $1 OR from_number = $1
+         ORDER BY timestamp DESC, created_at DESC
+         LIMIT 1
+       )`,
+      [identifier]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async markMessageAsRead(messageId: string): Promise<StoredMessage | null> {
+    const result = await this.pool.query<any>(
+      `UPDATE messages
+       SET is_read = TRUE, read_at = NOW()
+       WHERE id = $1
+       RETURNING id, from_number, to_number, phone_number_id, contact_wa_id,
+                 contact_name, message_type, body, timestamp, status,
+                 is_read, read_at, raw_payload, created_at`,
+      [messageId]
+    );
+    if (!result.rows.length) return null;
+    const row = result.rows[0];
+    return {
+      ...row,
+      is_read: Boolean(row.is_read),
+      read_at: row.read_at ? new Date(row.read_at).toISOString() : null,
+      timestamp: new Date(row.timestamp).toISOString(),
+      created_at: new Date(row.created_at).toISOString(),
+    };
   }
 
   async saveWebhookLog(input: SaveWebhookLogInput): Promise<void> {
@@ -536,6 +613,8 @@ export class MemoryMessageRepository implements MessageRepository {
       body,
       timestamp: timestamp.toISOString(),
       status: "received",
+      is_read: false,
+      read_at: null,
       raw_payload: { msg, value },
       created_at: now,
     });
@@ -568,6 +647,7 @@ export class MemoryMessageRepository implements MessageRepository {
         last_message: string;
         last_timestamp: string;
         message_count: number;
+        unread_count: number;
       }
     >();
 
@@ -575,6 +655,7 @@ export class MemoryMessageRepository implements MessageRepository {
       const identifier = msg.contact_wa_id || msg.from_number;
       const contact = this.contacts.get(identifier);
       const contactName = contact?.name || msg.contact_name || msg.from_number;
+      const isUnread = !msg.is_read;
 
       const existing = grouped.get(identifier);
       if (!existing) {
@@ -585,9 +666,13 @@ export class MemoryMessageRepository implements MessageRepository {
           last_message: msg.body,
           last_timestamp: msg.timestamp,
           message_count: 1,
+          unread_count: isUnread ? 1 : 0,
         });
       } else {
         existing.message_count += 1;
+        if (isUnread) {
+          existing.unread_count += 1;
+        }
         if (new Date(msg.timestamp) > new Date(existing.last_timestamp)) {
           existing.last_message = msg.body;
           existing.last_timestamp = msg.timestamp;
@@ -604,12 +689,46 @@ export class MemoryMessageRepository implements MessageRepository {
     const list: StoredMessage[] = [];
     for (const msg of this.messages.values()) {
       if (msg.contact_wa_id === identifier || msg.from_number === identifier) {
-        list.push(msg);
+        list.push({ ...msg });
       }
     }
     return list.sort(
       (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
     );
+  }
+
+  async markConversationAsRead(identifier: string): Promise<StoredMessage[]> {
+    const marked: StoredMessage[] = [];
+    const now = new Date().toISOString();
+    for (const msg of this.messages.values()) {
+      if ((msg.contact_wa_id === identifier || msg.from_number === identifier) && !msg.is_read) {
+        msg.is_read = true;
+        msg.read_at = now;
+        marked.push({ ...msg });
+      }
+    }
+    return marked;
+  }
+
+  async markConversationAsUnread(identifier: string): Promise<boolean> {
+    const matching = Array.from(this.messages.values()).filter(
+      (m) => m.contact_wa_id === identifier || m.from_number === identifier
+    );
+    if (matching.length === 0) return false;
+    matching.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    const latest = matching[0];
+    if (!latest) return false;
+    latest.is_read = false;
+    latest.read_at = null;
+    return true;
+  }
+
+  async markMessageAsRead(messageId: string): Promise<StoredMessage | null> {
+    const msg = this.messages.get(messageId);
+    if (!msg) return null;
+    msg.is_read = true;
+    msg.read_at = new Date().toISOString();
+    return { ...msg };
   }
 
   async saveWebhookLog(input: SaveWebhookLogInput): Promise<void> {

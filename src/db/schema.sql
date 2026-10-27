@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS messages (
   body TEXT,
   timestamp TIMESTAMPTZ NOT NULL,
   status VARCHAR(64) NOT NULL DEFAULT 'received',
+  is_read BOOLEAN NOT NULL DEFAULT FALSE,
+  read_at TIMESTAMPTZ,
   raw_payload JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -40,6 +42,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_from_number ON messages(from_number);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_contact_wa_id ON messages(contact_wa_id);
+CREATE INDEX IF NOT EXISTS idx_messages_contact_is_read ON messages(contact_wa_id, is_read);
 
 -- Tabel riwayat status pesan (sent, delivered, read, failed)
 CREATE TABLE IF NOT EXISTS message_statuses (

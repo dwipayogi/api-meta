@@ -4,6 +4,7 @@
   let activeMessages = [];
   let searchQuery = "";
   let lastMessageId = null;
+  let manualUnreadContactId = null;
 
   // Elemen DOM
   const appWrapper = document.getElementById("app-wrapper");
@@ -131,9 +132,10 @@
         const isActive = item.contact_identifier === activeContactId;
         const initials = getInitials(item.contact_name || item.from_number);
         const timeStr = formatTime(item.last_timestamp);
+        const hasUnread = Boolean(item.unread_count && item.unread_count > 0);
 
         return `
-          <div class="conversation-item ${isActive ? "active" : ""}" data-id="${item.contact_identifier}">
+          <div class="conversation-item ${isActive ? "active" : ""} ${hasUnread ? "has-unread" : ""}" data-id="${item.contact_identifier}">
             <div class="contact-avatar">${escapeHtml(initials)}</div>
             <div class="conversation-details">
               <div class="contact-header">
@@ -142,7 +144,16 @@
               </div>
               <div class="contact-preview">
                 <span class="last-message">${escapeHtml(item.last_message || "Pesan")}</span>
-                ${item.message_count > 1 ? `<span class="message-badge">${item.message_count}</span>` : ""}
+                <div style="display: flex; align-items: center;">
+                  ${hasUnread ? `<span class="unread-badge" title="${item.unread_count} pesan belum dibaca">${item.unread_count}</span>` : ""}
+                  <div class="conv-actions">
+                    ${
+                      hasUnread
+                        ? `<button class="btn-conv-action btn-item-read" data-id="${item.contact_identifier}" title="Tandai Sudah Dibaca">✓ Dibaca</button>`
+                        : `<button class="btn-conv-action btn-item-unread" data-id="${item.contact_identifier}" title="Tandai Belum Dibaca">✉️ Belum</button>`
+                    }
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -157,19 +168,70 @@
         if (id) selectConversation(id);
       });
     });
+
+    // Event listener tombol aksi cepat di item list
+    conversationListEl.querySelectorAll(".btn-item-read").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const id = btn.getAttribute("data-id");
+        if (id) markAsRead(id);
+      });
+    });
+
+    conversationListEl.querySelectorAll(".btn-item-unread").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const id = btn.getAttribute("data-id");
+        if (id) markAsUnread(id);
+      });
+    });
+  }
+
+  // Helper Tandai Sudah Dibaca (Internal + Meta Graph API)
+  async function markAsRead(contactId) {
+    if (!contactId) return;
+    try {
+      await fetch(`/api/conversations/${encodeURIComponent(contactId)}/read`, { method: "POST" });
+      const conv = conversations.find((c) => c.contact_identifier === contactId);
+      if (conv) conv.unread_count = 0;
+      renderConversationList();
+    } catch (err) {
+      console.error("Gagal menandai sudah dibaca:", err);
+    }
+  }
+
+  // Helper Tandai Belum Dibaca
+  async function markAsUnread(contactId) {
+    if (!contactId) return;
+    try {
+      await fetch(`/api/conversations/${encodeURIComponent(contactId)}/unread`, { method: "POST" });
+      const conv = conversations.find((c) => c.contact_identifier === contactId);
+      if (conv) conv.unread_count = Math.max(1, (conv.unread_count || 0) + 1);
+      renderConversationList();
+    } catch (err) {
+      console.error("Gagal menandai belum dibaca:", err);
+    }
   }
 
   // Pilih Percakapan
   async function selectConversation(contactId) {
+    manualUnreadContactId = null;
     activeContactId = contactId;
-    renderConversationList();
 
     const conv = conversations.find((c) => c.contact_identifier === contactId);
     if (conv) {
       activeChatNameEl.textContent = conv.contact_name || conv.from_number;
       activeChatSubEl.textContent = `WA ID: ${conv.contact_identifier} | No: ${conv.from_number}`;
       activeChatAvatarEl.textContent = getInitials(conv.contact_name || conv.from_number);
+
+      // Jika ada unread, otomatis tandai sudah dibaca
+      if (conv.unread_count > 0) {
+        conv.unread_count = 0;
+        markAsRead(contactId);
+      }
     }
+
+    renderConversationList();
 
     emptyStateEl.style.display = "none";
     activeChatContentEl.style.display = "flex";
@@ -192,6 +254,15 @@
       activeMessages = messages;
 
       const currentLatestId = messages.length > 0 ? messages[messages.length - 1].id : null;
+      if (currentLatestId !== lastMessageId) {
+        manualUnreadContactId = null;
+      }
+
+      // Jika ada pesan yang masih unread saat chat dibuka (dan bukan baru saja ditandai belum dibaca secara manual)
+      if (activeContactId !== manualUnreadContactId && messages.some((m) => m.is_read === false)) {
+        markAsRead(activeContactId);
+      }
+
       const shouldScroll = scrollToBottom || currentLatestId !== lastMessageId;
       lastMessageId = currentLatestId;
 
@@ -215,6 +286,7 @@
     }
 
     let lastDate = "";
+    let hasRenderedUnreadDivider = false;
     const htmlParts = [];
 
     activeMessages.forEach((msg, idx) => {
@@ -233,8 +305,26 @@
         htmlParts.push(`<div class="date-divider">${escapeHtml(dateString)}</div>`);
       }
 
+      // Pembatas Pesan Baru
+      if (!hasRenderedUnreadDivider && msg.is_read === false) {
+        hasRenderedUnreadDivider = true;
+        htmlParts.push(`<div class="unread-divider"><span>PESAN BELUM DIBACA</span></div>`);
+      }
+
       const timeStr = msgDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       const senderName = msg.contact_name || msg.from_number;
+
+      // Status centang pesan WhatsApp (✓, ✓✓ abu, ✓✓ biru)
+      let tickHtml = "";
+      if (msg.status === "read" || msg.is_read) {
+        tickHtml = `<span class="msg-status-tick tick-read" title="Sudah Dibaca (Read)">✓✓</span>`;
+      } else if (msg.status === "delivered") {
+        tickHtml = `<span class="msg-status-tick tick-delivered" title="Tersampaikan (Delivered)">✓✓</span>`;
+      } else if (msg.status === "sent") {
+        tickHtml = `<span class="msg-status-tick tick-sent" title="Terkirim (Sent)">✓</span>`;
+      } else if (msg.status === "failed") {
+        tickHtml = `<span class="msg-status-tick" style="color: #ea0038;" title="Gagal Terkirim">!</span>`;
+      }
 
       htmlParts.push(`
         <div class="message-row">
@@ -242,7 +332,10 @@
             <div class="message-sender">${escapeHtml(senderName)}</div>
             <div class="message-text">${escapeHtml(msg.body)}</div>
             <div class="message-meta">
-              <span class="message-time">${escapeHtml(timeStr)}</span>
+              <span class="message-time">
+                ${escapeHtml(timeStr)}
+                ${tickHtml}
+              </span>
               <button class="btn-inspect" data-idx="${idx}" title="Lihat Raw JSON Payload">🔍 Payload</button>
             </div>
           </div>
@@ -308,6 +401,20 @@
       closePayloadModal();
     }
   });
+
+  // Tombol Header: Tandai Percakapan Belum Dibaca
+  const btnToggleUnreadEl = document.getElementById("btn-toggle-unread");
+  if (btnToggleUnreadEl) {
+    btnToggleUnreadEl.addEventListener("click", async () => {
+      if (!activeContactId) {
+        alert("Belum ada chat yang dipilih");
+        return;
+      }
+      manualUnreadContactId = activeContactId;
+      await markAsUnread(activeContactId);
+      await loadConversations();
+    });
+  }
 
   // Tombol Header: Lihat detail pesan terakhir
   btnViewContactDetails.addEventListener("click", () => {

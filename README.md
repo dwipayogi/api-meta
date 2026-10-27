@@ -13,13 +13,22 @@ Stack: Node.js 22+, Express 5, TypeScript, PostgreSQL (`pg`), Pino.
 2. **Penyimpanan PostgreSQL**:
    - Tabel `accounts`: menyimpan kredensial akun login (`username`, `password_hash` dengan hashing `scrypt`). **Tidak di-hardcode di `.env`**.
    - Tabel `contacts`: profil kontak WhatsApp (`wa_id`, nama, nomor telepon)
-   - Tabel `messages`: riwayat pesan lengkap (`id`, nomor pengirim, nomor penerima, isi pesan, timestamp, raw payload JSONB)
+   - Tabel `messages`: riwayat pesan lengkap (`id`, nomor pengirim, nomor penerima, isi pesan, timestamp, `is_read`, `read_at`, `status`, raw payload JSONB)
    - Tabel `message_statuses`: update status pesan keluar (`sent`, `delivered`, `read`, `failed`)
    - Tabel `webhook_logs`: riwayat setiap raw payload JSON yang berhasil diterima dari Meta.
    - Otomatis inisialisasi tabel (*auto migration*) saat pertama kali aplikasi dijalankan.
    - *Fallback* otomatis ke `MemoryMessageRepository` jika `DATABASE_URL` belum diset (sangat membantu saat dev lokal / testing).
 3. **WhatsApp Web UI & Payload Viewer**:
    - Tampilan chat modern persis WhatsApp Web (daftar kontak di kiri, balon pesan di kanan).
+   - **Indikator Unread & Status Baca (WhatsApp Style)**:
+     - Badge bulat hijau unread count pada percakapan dengan pesan baru yang belum dibaca.
+     - Teks nama kontak, cuplikan pesan, dan timestamp dibuat tebal (*bold*) berwarna hijau untuk pesan belum dibaca.
+     - Balon pesan dilengkapi status centang WhatsApp: Centang 1 abu-abu (terkirim), Centang 2 abu-abu (tersampaikan), dan Centang 2 biru (sudah dibaca).
+     - Garis pembatas *"PESAN BELUM DIBACA"* saat membuka obrolan dengan pesan baru.
+     - Auto-read saat obrolan dibuka/dipilih.
+     - Tombol cepat **"Tandai Belum Dibaca"** dan **"Tandai Sudah Dibaca"** di header obrolan dan item percakapan.
+   - **Integrasi Dua Arah Meta Cloud API (Mark as Read)**:
+     - Saat pesan dibuka/ditandai dibaca di dashboard, sistem dapat mengirim *read receipt* ke Meta Graph API sehingga tanda centang di aplikasi WhatsApp pelanggan otomatis berubah menjadi **centang dua biru**.
    - Fitur **Inspect Payload**: tombol pada setiap balon pesan untuk membuka modal dan melihat seluruh raw JSON payload dari Meta secara terformat, lengkap dengan tombol salin (copy JSON).
    - Halaman **Log Webhook** (`/logs`): melihat seluruh payload webhook yang masuk secara real-time.
    - Fitur **Ganti Password**: modal untuk memperbarui password akun langsung di database.

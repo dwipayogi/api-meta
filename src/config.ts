@@ -6,6 +6,9 @@ export interface Config {
   appSecret: string;
   databaseUrl?: string;
   sessionSecret: string;
+  metaAccessToken?: string;
+  metaApiVersion?: string;
+  metaPhoneNumberId?: string;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -24,5 +27,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     appSecret: required(env, "APP_SECRET"),
     databaseUrl: env.DATABASE_URL,
     sessionSecret: env.SESSION_SECRET ?? "wa-webhook-session-secret-change-in-production",
+    metaAccessToken: env.META_ACCESS_TOKEN || undefined,
+    metaApiVersion: env.META_API_VERSION || "v21.0",
+    metaPhoneNumberId: env.META_PHONE_NUMBER_ID || undefined,
   };
 }
